@@ -370,6 +370,18 @@ class FaissStore:
     def _load_seq(self) -> int:
         if self._seq_path.exists():
             return int(self._seq_path.read_text().strip())
+        # Fallback: compute max existing doc ID so we never collide
+        try:
+            cur = self._db.execute(
+                "SELECT id FROM docs WHERE id GLOB 'doc_*' ORDER BY CAST(SUBSTR(id, 5) AS INTEGER) DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row:
+                parts = row[0].split('_')
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    return int(parts[-1])
+        except Exception:
+            pass
         return 0
 
     def _save_seq(self) -> None:
