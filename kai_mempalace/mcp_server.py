@@ -438,6 +438,32 @@ def _build_tool_definitions() -> list[dict]:
             },
         },
         {
+            "name": "mine_file",
+            "description": "Mine a single file into the palace (chunks, extracts metadata, stores drawers)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Path to the file to mine"},
+                    "wing": {"type": "string", "description": "Target wing"},
+                    "room": {"type": "string", "description": "Target room"},
+                },
+                "required": ["filepath", "wing", "room"],
+            },
+        },
+        {
+            "name": "batch_mine",
+            "description": "Mine all matching files in a directory into the palace",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Directory to scan for files"},
+                    "wing": {"type": "string", "description": "Target wing (optional; auto-detected from dir name)"},
+                    "pattern": {"type": "string", "description": "Glob pattern to filter files (e.g. *.md, *.txt)"},
+                },
+                "required": ["directory"],
+            },
+        },
+        {
             "name": "rebuild_fts",
             "description": "Rebuild the FTS5 full-text search index from all drawer contents",
             "inputSchema": {"type": "object", "properties": {}},
