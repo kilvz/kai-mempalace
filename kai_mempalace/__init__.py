@@ -1,6 +1,6 @@
 """Kai MemPalace v4.2.0 — FAISS-powered memory palace with hybrid search, entity graph, MCP server, and 40 MCP tools."""
 
-__version__ = "4.2.0"
+__version__ = "4.3.0"
 
 from kai_mempalace.palace import Palace, SearchResult, mine_lock, MineAlreadyRunning
 from kai_mempalace.backends.embedder import (
