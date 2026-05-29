@@ -1,0 +1,16 @@
+FROM alpine:3.21
+
+RUN apk add --no-cache python3 py3-pip py3-numpy py3-scipy git
+
+WORKDIR /test
+COPY . /test/kai-mempalace
+
+RUN sed -i 's/setuptools.backends._legacy:_Backend/setuptools.build_meta/' /test/kai-mempalace/pyproject.toml
+
+# Install with deps (faiss now has musl wheels)
+RUN pip install --break-system-packages /test/kai-mempalace 2>&1
+
+# Test --help
+RUN python3 -m kai_mempalace.cli --help 2>&1
+
+CMD ["python3", "-m", "kai_mempalace.cli", "--help"]
