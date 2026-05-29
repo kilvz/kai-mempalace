@@ -12,7 +12,7 @@ import re
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from kai_mempalace.i18n import get_entity_patterns
 
