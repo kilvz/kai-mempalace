@@ -346,7 +346,9 @@ class Palace:
             with open(self._base / "palace.json", "w") as f:
                 json.dump({
                     "version": 3, "created_at": datetime.utcnow().isoformat(),
-                    "backend": "faiss", "embedding": "sentence_transformers", "dimension": 384,
+                    "backend": "faiss",
+                    "embedding": self._embedder_config_name(self._embedder),
+                    "dimension": 384,
                 }, f)
 
         self._initialized = True
@@ -385,7 +387,57 @@ class Palace:
                 "spacy_glove": "spacy",
             }
             model = mapping.get(model, model)
+        else:
+            from kai_mempalace.config import KaiPalaceConfig
+            model = KaiPalaceConfig().default_embedder
+        model = self._resolve_embedder(model, config_path)
         return get_embedder(model=model, model_dir=str(self._data_dir))
+
+    @staticmethod
+    def _resolve_embedder(model: str, config_path: Path) -> str:
+        """Check if the configured embedder's dependency is available; fall back to numpy if not."""
+        if model == "sentence":
+            try:
+                from sentence_transformers import SentenceTransformer
+                SentenceTransformer
+            except ImportError:
+                logger.warning("sentence_transformers not installed — falling back to numpy. Install with: pip install sentence-transformers")
+                model = "numpy"
+        elif model == "spacy":
+            try:
+                import spacy
+                spacy
+            except ImportError:
+                logger.warning("spacy not installed — falling back to numpy. Install with: pip install spacy")
+                model = "numpy"
+        elif model == "minilm" or model == "embeddinggemma":
+            try:
+                import onnxruntime
+                onnxruntime
+            except ImportError:
+                logger.warning("onnxruntime not installed for %s — falling back to numpy", model)
+                model = "numpy"
+        if model != "sentence" and config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            if config.get("embedding") != "numpy_tfidf_svd":
+                config["embedding"] = "numpy_tfidf_svd"
+                with open(config_path, "w") as f:
+                    json.dump(config, f)
+        return model
+
+    @staticmethod
+    def _embedder_config_name(embedder: Any) -> str:
+        """Map embedder instance back to its palace.json config name."""
+        cls_name = type(embedder).__name__
+        mapping = {
+            "NumpyEmbedder": "numpy_tfidf_svd",
+            "SentenceTransformerEmbedder": "sentence_transformers",
+            "SpacyGloveEmbedder": "spacy_glove",
+            "OnnxEmbedder": "minilm",
+            "EmbeddinggemmaONNX": "embeddinggemma",
+        }
+        return mapping.get(cls_name, "numpy_tfidf_svd")
 
     @property
     def kg(self) -> KnowledgeGraph:

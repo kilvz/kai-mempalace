@@ -316,6 +316,36 @@ class KaiPalaceConfig:
             pass
         return self.get_hook_settings()
 
+    @property
+    def default_embedder(self) -> str:
+        """Default embedder model for new palaces. One of: sentence, spacy, numpy."""
+        env_val = os.environ.get("KAI_DEFAULT_EMBEDDER")
+        if env_val:
+            return env_val.strip().lower()
+        return str(self._file_config.get("default_embedder", "sentence"))
+
+    def set_default_embedder(self, model: str) -> str:
+        model = model.strip().lower()
+        if model not in ("sentence", "spacy", "numpy"):
+            raise ValueError("default_embedder must be one of: sentence, spacy, numpy")
+        self._file_config["default_embedder"] = model
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._config_file, "w", encoding="utf-8") as f:
+                json.dump(self._file_config, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+        return model
+
+    def _save_and_return(self, field: str):
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._config_file, "w", encoding="utf-8") as f:
+                json.dump(self._file_config, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+        return self.get_hook_settings()
+
     def init(self):
         self._config_dir.mkdir(parents=True, exist_ok=True)
         if not self._config_file.exists():

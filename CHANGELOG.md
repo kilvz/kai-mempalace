@@ -1,5 +1,19 @@
 # Changelog
 
+## v4.2.0 (2026-05-29)
+
+Pluggable embedders, auto-fallback, and AI-settable default. kai-mempalace now has **40 MCP tools** (up from 38).
+
+### New features
+
+- **Pluggable embedder system** — `backends/embedder.py`: `SentenceTransformerEmbedder` (PyTorch MiniLM-L6-v2, 384d), `SpacyGloveEmbedder` (spaCy GloVe, 300→384d via zero-pad), both wired into `get_embedder()` factory
+- **Auto-fallback** — `palace.py._resolve_embedder()`: detects missing deps at init time (sentence-transformers/spacy/onnxruntime) → logs warning → falls back to numpy; config file is rewritten to reflect the active embedder
+- **`set_default_embedder` MCP tool** — persists the default embedder for new palaces to `~/.kai-palace/config.json`; no server restart needed
+- **`get_default_embedder` MCP tool** — returns the current global default embedder
+- **`KaiPalaceConfig.default_embedder`** — reads from env var `KAI_DEFAULT_EMBEDDER` or config file
+- **`_embedder_config_name()`** — maps embedder instance back to palace.json config name; `init()` now writes the *actual resolved* embedder, not a hardcoded default
+- **Comprehensive README** — full architectural diff vs upstream MemPalace (8 layers, dependencies, platform support, file-by-file, MCP tools comparison)
+
 ## v4.1.0 (2026-05-29)
 
 Feature-complete MCP server, project scanner, and entity detection port. kai-mempalace now has **35 MCP tools** matching or exceeding upstream, plus new schema migration, content-date extraction, and hybrid search strategy system.

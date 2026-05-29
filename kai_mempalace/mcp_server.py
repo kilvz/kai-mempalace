@@ -41,7 +41,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 _TOOL_DEFINITIONS: list[dict] = []
@@ -480,6 +480,26 @@ def _build_tool_definitions() -> list[dict]:
                 "required": ["model"],
             },
         },
+        {
+            "name": "get_default_embedder",
+            "description": "Get the default embedder model for new palaces (global config)",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_default_embedder",
+            "description": "Set the default embedder model for new palaces (global config ~/.kai-palace/config.json)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Embedder name: sentence, spacy, or numpy",
+                        "enum": ["sentence", "spacy", "numpy"],
+                    },
+                },
+                "required": ["model"],
+            },
+        },
     ]
     _TOOL_DEFINITIONS.extend(extra_tools)
     return _TOOL_DEFINITIONS
@@ -567,6 +587,8 @@ class MCPServer:
         self._register("reconnect", self._reconnect, [])
         self._register("hook_settings", self._hook_settings, [])
         self._register("set_embedder", self._set_embedder, ["model"])
+        self._register("get_default_embedder", self._get_default_embedder, [])
+        self._register("set_default_embedder", self._set_default_embedder, ["model"])
 
     def handle_request(self, raw: str) -> str | None:
         """Process one JSON-RPC request line, return JSON response string.
@@ -927,6 +949,15 @@ class MCPServer:
             model=params["model"],
             reindex=params.get("reindex", True),
         )
+
+    def _get_default_embedder(self, params: dict) -> dict:
+        from kai_mempalace.config import KaiPalaceConfig
+        return {"default_embedder": KaiPalaceConfig().default_embedder}
+
+    def _set_default_embedder(self, params: dict) -> dict:
+        from kai_mempalace.config import KaiPalaceConfig
+        model = KaiPalaceConfig().set_default_embedder(params["model"])
+        return {"default_embedder": model}
 
     # -- Helpers ----------------------------------------------------------------
 
