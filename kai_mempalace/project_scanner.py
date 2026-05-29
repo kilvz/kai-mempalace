@@ -79,87 +79,85 @@ class PersonInfo:
         return f"{self.total_commits} commit{'s' if self.total_commits != 1 else ''} across {r} repo{'s' if r != 1 else ''}"
 
 
-def _read_manifest(path: Path) -> Optional[str]:
+MANIFEST_PRIORITY = {
+    "pyproject.toml": 0,
+    "package.json": 1,
+    "Cargo.toml": 2,
+    "go.mod": 3,
+}
+
+
+def _parse_package_json(path: Path) -> Optional[str]:
     try:
-        if path.name == "package.json":
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            return data.get("name")
-        elif path.name == "pyproject.toml":
-            try:
-                import tomllib
-            except ImportError:
-                try:
-                    import tomli as tomllib
-                except ImportError:
-                    return None
-            data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
-            project = data.get("project", {})
-            return project.get("name") or data.get("tool", {}).get("poetry", {}).get("name")
-        elif path.name == "Cargo.toml":
-            try:
-                import tomllib
-            except ImportError:
-                try:
-                    import tomli as tomllib
-                except ImportError:
-                    return None
-            data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
-            pkg = data.get("package", {})
-            if isinstance(pkg, list):
-                return pkg[0].get("name") if pkg else None
-            return pkg.get("name")
-        elif path.name == "go.mod":
-            first_line = path.read_text(encoding="utf-8", errors="replace").split("\n")[0]
-            m = re.match(r"module\s+(\S+)", first_line)
-            if m:
-                return m.group(1).split("/")[-1]
-        elif path.name == "Gemfile":
-            return path.parent.name
-        elif path.name in ("setup.py", "setup.cfg"):
-            return path.parent.name
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    name = data.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _parse_pyproject(path: Path) -> Optional[str]:
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            return None
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
+        return None
+    name = data.get("project", {}).get("name")
+    if isinstance(name, str) and name:
+        return name
+    name = data.get("tool", {}).get("poetry", {}).get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _parse_cargo(path: Path) -> Optional[str]:
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            return None
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    name = data.get("package", {}).get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _parse_gomod(path: Path) -> Optional[str]:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("module "):
+                mod = line.split(None, 1)[1].strip()
+                return mod.split("/")[-1] or None
+    except OSError:
         return None
     return None
 
 
-def _git_log(repo_path: Path) -> tuple[int, int, bool]:
-    try:
-        result = subprocess.run(
-            ["git", "log", "--oneline", "--max-count=" + str(MAX_COMMITS_PER_REPO + 1)],
-            capture_output=True, text=True, timeout=GIT_TIMEOUT,
-            cwd=str(repo_path),
-        )
-        if result.returncode != 0:
-            return 0, 0, False
-        lines = [l for l in result.stdout.split("\n") if l.strip()]
-        total = len(lines)
-        return total, total, True
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return 0, 0, False
+MANIFEST_PARSERS = {
+    "package.json": _parse_package_json,
+    "pyproject.toml": _parse_pyproject,
+    "Cargo.toml": _parse_cargo,
+    "go.mod": _parse_gomod,
+}
 
 
-def _find_manifests(root: Path, depth: int = 0) -> list[Path]:
-    if depth > MAX_DEPTH:
-        return []
-    manifests = []
-    try:
-        for item in root.iterdir():
-            if item.name in SKIP_DIRS or item.name.startswith("."):
-                continue
-            if item.is_dir():
-                manifests.extend(_find_manifests(item, depth + 1))
-            elif item.is_file() and item.name in (
-                "package.json", "pyproject.toml", "Cargo.toml",
-                "go.mod", "Gemfile", "setup.py", "setup.cfg",
-            ):
-                manifests.append(item)
-    except (PermissionError, OSError):
-        pass
-    return manifests
-
-
-def _is_git_repo(path: Path) -> bool:
-    return (path / ".git").exists()
+def _read_manifest(path: Path) -> Optional[str]:
+    parser = MANIFEST_PARSERS.get(path.name)
+    if parser:
+        return parser(path)
+    if path.name in ("Gemfile", "setup.py", "setup.cfg"):
+        return path.parent.name
+    return None
 
 
 def _git_authors(repo: Path) -> list[tuple[str, str]]:
@@ -228,86 +226,353 @@ def _looks_like_real_name(name: str) -> bool:
     return parts[0][:1].isupper() and parts[-1][:1].isupper()
 
 
-def scan(root: str) -> tuple[list[ProjectInfo], list[PersonInfo]]:
+# ==================== GIT USER IDENTITY ====================
+
+
+def _git_user_identity(repo: Path) -> tuple[str, str]:
+    name = _run_git(repo, "config", "user.name", timeout=2).strip()
+    email = _run_git(repo, "config", "user.email", timeout=2).strip()
+    return name, email
+
+
+def _global_git_identity() -> tuple[str, str]:
+    try:
+        n = subprocess.run(
+            ["git", "config", "--global", "user.name"],
+            capture_output=True, text=True, timeout=2, check=False,
+        ).stdout.strip()
+        e = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True, timeout=2, check=False,
+        ).stdout.strip()
+        return n, e
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+
+
+# ==================== DIRECTORY WALK ====================
+
+
+def _walk(root: Path, max_depth: int = MAX_DEPTH):
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        rel = Path(dirpath).relative_to(root)
+        depth = 0 if rel == Path(".") else len(rel.parts)
+        if depth > max_depth:
+            dirs.clear()
+            continue
+        yield Path(dirpath), dirs, files
+
+
+def _has_git_marker(path: Path) -> bool:
+    git_path = path / ".git"
+    return git_path.is_dir() or git_path.is_file()
+
+
+def _manifest_sort_key(
+    entry: tuple[str, str, Path], repo_root: Path
+) -> tuple[int, int, str]:
+    manifest_file, _project_name, manifest_dir = entry
+    try:
+        rel = manifest_dir.relative_to(repo_root)
+        depth = len(rel.parts)
+        rel_str = rel.as_posix()
+    except ValueError:
+        depth = MAX_DEPTH + 1
+        rel_str = manifest_dir.as_posix()
+    return (depth, MANIFEST_PRIORITY.get(manifest_file, 99), rel_str)
+
+
+def find_git_repos(root: Path, max_depth: int = MAX_DEPTH) -> list[Path]:
+    root = root.resolve()
+    repos: list[Path] = []
+    if _has_git_marker(root):
+        repos.append(root)
+    for dirpath, dirs, _ in _walk(root, max_depth):
+        if dirpath == root:
+            continue
+        if _has_git_marker(dirpath):
+            repos.append(dirpath)
+            dirs.clear()
+    return repos
+
+
+def _collect_manifest_names(repo_root: Path) -> list[tuple[str, str, Path]]:
+    found: list[tuple[str, str, Path]] = []
+    for dirpath, dirs, files in _walk(repo_root):
+        if dirpath != repo_root and _has_git_marker(dirpath):
+            dirs.clear()
+            continue
+        for fname in files:
+            parser = MANIFEST_PARSERS.get(fname)
+            if not parser:
+                continue
+            name = parser(dirpath / fname)
+            if name:
+                found.append((fname, name, dirpath))
+    return sorted(found, key=lambda e: _manifest_sort_key(e, repo_root))
+
+
+# ==================== UNION-FIND DEDUP ====================
+
+
+class _UnionFind:
+    def __init__(self) -> None:
+        self.parent: dict = {}
+
+    def find(self, x):
+        if x not in self.parent:
+            self.parent[x] = x
+            return x
+        root = x
+        while self.parent[root] != root:
+            root = self.parent[root]
+        while self.parent[x] != root:
+            self.parent[x], x = root, self.parent[x]
+        return root
+
+    def union(self, a, b) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def _dedupe_people(
+    all_commits: list[tuple[str, str, str]],
+) -> dict[str, PersonInfo]:
+    uf = _UnionFind()
+    for name, email, _repo in all_commits:
+        uf.union(("name", name), ("email", email) if email else ("name", name))
+
+    component_commits: dict = {}
+    for name, email, repo in all_commits:
+        key = uf.find(("name", name))
+        entry = component_commits.setdefault(
+            key, {"name_counts": {}, "emails": set(), "repos": set(), "total": 0}
+        )
+        entry["name_counts"][name] = entry["name_counts"].get(name, 0) + 1
+        if email:
+            entry["emails"].add(email)
+        entry["repos"].add(repo)
+        entry["total"] += 1
+
+    people: dict[str, PersonInfo] = {}
+    for _key, entry in component_commits.items():
+        candidates = sorted(entry["name_counts"].items(), key=lambda x: -x[1])
+        display = next(
+            (n for n, _ in candidates if _looks_like_real_name(n)),
+            candidates[0][0],
+        )
+        if not _looks_like_real_name(display):
+            continue
+        existing = people.get(display)
+        if existing:
+            existing.total_commits += entry["total"]
+            existing.emails.update(entry["emails"])
+            existing.repos.update(entry["repos"])
+        else:
+            people[display] = PersonInfo(
+                name=display,
+                total_commits=entry["total"],
+                emails=set(entry["emails"]),
+                repos=set(entry["repos"]),
+            )
+    return people
+
+
+# ==================== MAIN SCAN ====================
+
+
+def scan(root: str | os.PathLike) -> tuple[list[ProjectInfo], list[PersonInfo]]:
     root_path = Path(root).expanduser().resolve()
-    if not root_path.exists():
+    if not root_path.is_dir():
         return [], []
 
-    projects = []
-    people_map: dict[str, PersonInfo] = {}
+    repos = find_git_repos(root_path)
 
-    def _add_person(name: str, email: str, repo: Path) -> None:
-        if not name or not email:
-            return
-        if _is_bot(name, email):
-            return
-        if name not in people_map:
-            people_map[name] = PersonInfo(name=name)
-        p = people_map[name]
-        p.emails.add(email)
-        p.repos.add(str(repo))
+    me_name, me_email = "", ""
+    if repos:
+        me_name, me_email = _git_user_identity(repos[0])
+    if not me_name and not me_email:
+        me_name, me_email = _global_git_identity()
 
-    def _gather_people(repo: Path) -> None:
-        authors = _git_authors(repo)
-        for author_name, author_email in authors:
-            _add_person(author_name, author_email, repo)
+    projects: dict[str, ProjectInfo] = {}
+    all_commits: list[tuple[str, str, str]] = []
 
-    if _is_git_repo(root_path):
-        total, user, has_git = _git_log(root_path)
-        manifests = _find_manifests(root_path)
-        manifest_name = None
+    for repo in repos:
+        manifests = _collect_manifest_names(repo)
         if manifests:
-            manifest_name = _read_manifest(manifests[0])
-        name = manifest_name or root_path.name
-        projects.append(ProjectInfo(
-            name=name, repo_root=root_path, manifest=manifest_name,
-            has_git=has_git, total_commits=total, user_commits=user,
-        ))
-        _gather_people(root_path)
+            manifest_file, proj_name, _ = manifests[0]
+        else:
+            manifest_file, proj_name = None, repo.name
 
-    manifests = _find_manifests(root_path)
-    for m in manifests:
-        if m.parent == root_path and _is_git_repo(root_path):
-            continue
-        name = _read_manifest(m)
-        if name:
-            is_git = _is_git_repo(m.parent)
-            tc, uc, _ = _git_log(m.parent) if is_git else (0, 0, False)
-            projects.append(ProjectInfo(
-                name=name, repo_root=m.parent, manifest=name,
-                has_git=is_git, total_commits=tc, user_commits=uc,
-            ))
-            if is_git:
-                _gather_people(m.parent)
+        authors = _git_authors(repo)
+        non_bot_authors = [
+            (name, email) for name, email in authors if not _is_bot(name, email)
+        ]
+        total_commits = len(non_bot_authors)
+        user_commits = 0
+        author_counts: dict[str, int] = {}
+        for name, email in non_bot_authors:
+            author_counts[name] = author_counts.get(name, 0) + 1
+            all_commits.append((name, email, str(repo)))
+            if (me_name and name == me_name) or (me_email and email == me_email):
+                user_commits += 1
 
-    people = sorted(people_map.values(), key=lambda p: -p.confidence)
+        is_mine = False
+        if user_commits > 0:
+            sorted_authors = sorted(author_counts.items(), key=lambda x: -x[1])
+            top5 = {n for n, _ in sorted_authors[:5]}
+            if me_name and me_name in top5:
+                is_mine = True
+            elif total_commits and user_commits / total_commits >= 0.10:
+                is_mine = True
+            elif user_commits >= 20:
+                is_mine = True
 
-    # Count total commits per person across all repos they appear in
-    for p in people:
-        total = 0
-        for repo_str in p.repos:
-            authors = _git_authors(Path(repo_str))
-            total += sum(1 for n, _ in authors if n == p.name)
-        p.total_commits = total
+        proj = ProjectInfo(
+            name=proj_name,
+            repo_root=repo,
+            manifest=manifest_file,
+            has_git=True,
+            total_commits=total_commits,
+            user_commits=user_commits,
+            is_mine=is_mine,
+        )
+        existing = projects.get(proj_name)
+        if existing is None or proj.user_commits > existing.user_commits:
+            projects[proj_name] = proj
 
-    return projects, people
+    people = _dedupe_people(all_commits)
+
+    if not repos:
+        manifests = _collect_manifest_names(root_path)
+        for manifest_file, proj_name, _dirpath in manifests:
+            if proj_name in projects:
+                continue
+            projects[proj_name] = ProjectInfo(
+                name=proj_name,
+                repo_root=root_path,
+                manifest=manifest_file,
+                has_git=False,
+            )
+
+    project_list = sorted(
+        projects.values(),
+        key=lambda p: (not p.is_mine, -p.user_commits, -p.total_commits, p.name),
+    )
+    people_list = sorted(people.values(), key=lambda p: -p.total_commits)
+
+    return project_list, people_list
 
 
-def to_detected_dict(projects: list, people: list) -> dict:
+def to_detected_dict(
+    projects: list, people: list,
+    project_cap: int = 15, people_cap: int = 15,
+) -> dict:
+    proj_entries = [
+        {
+            "name": p.name,
+            "type": "project",
+            "confidence": round(p.confidence, 2),
+            "frequency": p.user_commits or p.total_commits,
+            "signals": [p.to_signal()],
+        }
+        for p in projects[:project_cap]
+    ]
+    people_entries = [
+        {
+            "name": p.name,
+            "type": "person",
+            "confidence": round(p.confidence, 2),
+            "frequency": p.total_commits,
+            "signals": [p.to_signal()],
+        }
+        for p in people[:people_cap]
+    ]
     return {
-        "people": [
-            {
-                "name": p.name,
-                "signal": p.to_signal(),
-                "confidence": p.confidence,
-                "emails": sorted(p.emails),
-                "repos": sorted(p.repos),
-            }
-            for p in people
-        ],
-        "projects": [
-            {"name": p.name, "confidence": p.confidence, "repo": str(p.repo_root)}
-            for p in projects
-        ],
+        "people": people_entries,
+        "projects": proj_entries,
+        "topics": [],
         "uncertain": [],
     }
+
+
+def _merge_detected(
+    primary: dict, secondary: dict, drop_secondary_uncertain: bool = False,
+) -> dict:
+    seen = {e["name"].lower() for cat in primary.values() for e in cat}
+    merged = {k: list(v) for k, v in primary.items()}
+    for cat_key in ("people", "projects", "topics", "uncertain"):
+        if cat_key == "uncertain" and drop_secondary_uncertain:
+            continue
+        for e in secondary.get(cat_key, []):
+            if e["name"].lower() in seen:
+                continue
+            merged.setdefault(cat_key, []).append(e)
+            seen.add(e["name"].lower())
+    return merged
+
+
+def discover_entities(
+    project_dir: str | os.PathLike,
+    languages: tuple = ("en",),
+    prose_file_cap: int = 10,
+    project_cap: int = 15,
+    people_cap: int = 15,
+    llm_provider: object = None,
+    show_progress: bool = True,
+    corpus_origin: dict | None = None,
+) -> dict:
+    projects, people = scan(project_dir)
+
+    real_signal = to_detected_dict(projects, people, project_cap=project_cap, people_cap=people_cap)
+
+    from kai_mempalace.entity_detector import detect_entities, scan_for_detection
+
+    prose_files = scan_for_detection(str(project_dir), max_files=prose_file_cap)
+    prose_detected = (
+        detect_entities(prose_files, languages=languages)
+        if prose_files
+        else {"people": [], "projects": [], "topics": [], "uncertain": []}
+    )
+
+    has_real_signal = bool(projects) or bool(people)
+    merged = _merge_detected(
+        real_signal,
+        prose_detected,
+        drop_secondary_uncertain=has_real_signal and llm_provider is None,
+    )
+
+    if llm_provider is not None:
+        from kai_mempalace.llm_refine import collect_corpus_text, refine_entities
+
+        corpus = collect_corpus_text(str(project_dir))
+        result = refine_entities(
+            merged,
+            corpus,
+            llm_provider,
+            show_progress=show_progress,
+            allow_project_promotions=not has_real_signal,
+            corpus_origin=corpus_origin,
+        )
+        if show_progress:
+            status_bits = []
+            if result.cancelled:
+                status_bits.append("cancelled")
+            if result.reclassified:
+                status_bits.append(f"reclassified {result.reclassified}")
+            if result.dropped:
+                status_bits.append(f"dropped {result.dropped}")
+            if result.errors:
+                status_bits.append(f"{len(result.errors)} batch error(s)")
+            if status_bits:
+                import sys as _sys
+                print(f"  LLM refine: {', '.join(status_bits)}", file=_sys.stderr)
+        merged = result.merged
+
+    if corpus_origin is not None:
+        from kai_mempalace.entity_detector import _apply_corpus_origin
+        merged = _apply_corpus_origin(merged, corpus_origin)
+
+    return merged

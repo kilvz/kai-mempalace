@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -145,7 +146,7 @@ def _extract_python_comments(source: str) -> list[dict[str, Any]]:
         return _extract_generic_comments(source, "#", False)
 
     if (tree.body and isinstance(tree.body[0], ast.Expr)
-            and isinstance(tree.body[0].value, (ast.Constant, ast.Str))):
+            and isinstance(tree.body[0].value, ast.Constant)):
         doc = tree.body[0].value
         val = doc.value if hasattr(doc, "value") else doc.s
         if isinstance(val, str) and val.strip():
@@ -154,7 +155,10 @@ def _extract_python_comments(source: str) -> list[dict[str, Any]]:
             seen_positions.add(pos)
 
     for node in ast.walk(tree):
-        doc = ast.get_docstring(node)
+        try:
+            doc = ast.get_docstring(node)
+        except TypeError:
+            doc = None
         if doc and doc.strip():
             pos = getattr(node, "lineno", 1)
             if pos not in seen_positions:
@@ -296,6 +300,7 @@ def _add_chunk(
     source_file: str = "",
     metadata: Optional[dict] = None,
     compress: bool = False,
+    content_date: Optional[str] = None,
 ) -> Optional[str]:
     if len(content.strip()) < 10:
         return None
@@ -305,19 +310,191 @@ def _add_chunk(
         return None
 
     final_content = aaak_compress(content) if compress else content
+    meta = metadata or {}
+    if content_date and "content_date" not in meta:
+        meta["content_date"] = content_date
 
     try:
         drawer_id = palace.add_drawer(
             wing=wing,
             room=room,
             content=final_content,
-            metadata=metadata or {},
+            metadata=meta,
             source_file=source_file,
         )
     except (ValueError, RuntimeError):
         return None
 
     return drawer_id
+
+
+# ── Content-date extraction ──────────────────────────────────────────────────
+# Hierarchy (first match wins):
+#   1. Filename — ISO regex on stem, then dateutil fuzzy parse
+#   2. YAML frontmatter — date / created / published field
+#   3. Content body, first ~10 lines: ISO, slash-dates w/ locale disambig,
+#      dateutil natural-language
+#   4. Filesystem mtime
+#   5. None — caller falls back to filed_at
+
+
+_ORDINAL_SUFFIX_RE = re.compile(r"\b(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
+_ISO_DATE_RE = re.compile(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b")
+_SLASH_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
+_MONTH_NAME = (
+    r"(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
+)
+_VALID_DATE_RE = re.compile(
+    r"(?:"
+    r"\b\d{4}[-/.\s]+\d{1,2}[-/.\s]+\d{1,2}\b"
+    r"|"
+    r"\b" + _MONTH_NAME + r"\.?[-\s]+\d{1,2}(?:st|nd|rd|th)?[,\s-]+\d{4}\b"
+    r"|"
+    r"\b\d{1,2}(?:st|nd|rd|th)?[-\s]+" + _MONTH_NAME + r"\.?[,\s-]+\d{4}\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _try_iso_match(text: str) -> Optional[str]:
+    m = _ISO_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _try_filename_date(source_file: str) -> Optional[str]:
+    try:
+        stem = Path(source_file).stem
+    except (TypeError, ValueError):
+        return None
+    if not stem:
+        return None
+    iso = _try_iso_match(stem)
+    if iso:
+        return iso
+    normalized = _ORDINAL_SUFFIX_RE.sub(r"\1", stem).replace("-", " ").replace("_", " ")
+    m = _VALID_DATE_RE.search(normalized)
+    if not m:
+        return None
+    try:
+        from dateutil import parser as dateutil_parser
+        dt = dateutil_parser.parse(m.group(0))
+        return dt.strftime("%Y-%m-%d")
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _try_frontmatter_date(content: str) -> Optional[str]:
+    if not content:
+        return None
+    stripped = content.lstrip()
+    if not stripped.startswith("---"):
+        return None
+    end_pos = stripped.find("\n---", 3)
+    if end_pos == -1:
+        return None
+    frontmatter_text = stripped[3:end_pos].strip()
+    if not frontmatter_text:
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(frontmatter_text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for field in ("date", "created", "published"):
+        value = data.get(field)
+        if value is None:
+            continue
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d")
+        try:
+            from dateutil import parser as dateutil_parser
+            dt = dateutil_parser.parse(str(value))
+            return dt.strftime("%Y-%m-%d")
+        except ImportError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _try_content_body_date(content: str) -> Optional[str]:
+    if not content:
+        return None
+    stripped = content.lstrip()
+    if stripped.startswith("---"):
+        end_fm = stripped.find("\n---", 3)
+        if end_fm != -1:
+            eol = stripped.find("\n", end_fm + 1)
+            if eol != -1:
+                stripped = stripped[eol + 1:]
+    head = "\n".join(stripped.split("\n", 10)[:10])
+    if not head:
+        return None
+    iso = _try_iso_match(head)
+    if iso:
+        return iso
+    slash_matches = _SLASH_DATE_RE.findall(head)
+    if slash_matches:
+        is_dd_mm = any(int(m[0]) > 12 for m in slash_matches)
+        first = slash_matches[0]
+        a, b, y = int(first[0]), int(first[1]), int(first[2])
+        if y < 100:
+            y = 1900 + y if y >= 70 else 2000 + y
+        try:
+            if is_dd_mm:
+                return datetime(y, b, a).strftime("%Y-%m-%d")
+            return datetime(y, a, b).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            pass
+    m = _VALID_DATE_RE.search(head)
+    if not m:
+        return None
+    try:
+        from dateutil import parser as dateutil_parser
+        dt = dateutil_parser.parse(m.group(0))
+        return dt.strftime("%Y-%m-%d")
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _try_mtime_date(source_file: str) -> Optional[str]:
+    try:
+        mtime = os.path.getmtime(source_file)
+    except (OSError, TypeError):
+        return None
+    try:
+        return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _extract_content_date(source_file: str, content: str) -> Optional[str]:
+    result = _try_filename_date(source_file)
+    if result:
+        return result
+    result = _try_frontmatter_date(content)
+    if result:
+        return result
+    result = _try_content_body_date(content)
+    if result:
+        return result
+    result = _try_mtime_date(source_file)
+    if result:
+        return result
+    return None
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -348,7 +525,10 @@ def mine_file_into_palace(
         return 0
 
     file_type = _classify_file(resolved)
+    content_date = _extract_content_date(resolved, content)
     metadata: dict[str, Any] = {"file_type": file_type, "source": resolved}
+    if content_date:
+        metadata["content_date"] = content_date
 
     if file_type == "code":
         chunks = _extract_code_comments(resolved, content)
@@ -381,6 +561,7 @@ def mine_file_into_palace(
             room=room,
             source_file=resolved,
             metadata=metadata,
+            content_date=content_date,
         )
         if drawer_id:
             created += 1

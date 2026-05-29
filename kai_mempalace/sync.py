@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
-from kai_mempalace.palace import Palace
+from kai_mempalace.palace import Palace, get_closets_collection, purge_file_closets
 
 logger = logging.getLogger(__name__)
 _BATCH = 1000
@@ -247,6 +247,13 @@ def sync_palace(
     for did in removable_ids:
         palace.delete_drawer(did)
     report["removed_drawers"] = len(removable_ids)
+
+    # Purge orphaned closets whose source_file was removed
+    if removable_sources:
+        closets_col = get_closets_collection(palace._base)
+        for src in removable_sources:
+            purge_file_closets(closets_col, src)
+    report["removed_closets"] = len(removable_sources)
 
     return report
 

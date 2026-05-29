@@ -1,5 +1,37 @@
 # Changelog
 
+## v4.1.0 (2026-05-29)
+
+Feature-complete MCP server, project scanner, and entity detection port. kai-mempalace now has **35 MCP tools** matching or exceeding upstream, plus new schema migration, content-date extraction, and hybrid search strategy system.
+
+### New features
+
+- **MCP protocol support** — `mcp_server.py`: MCP `initialize`/`notifications/*`/`tools/list`/`tools/call` handlers alongside legacy JSON-RPC; AAAK spec constant; 35 registered tool definitions (up from 18)
+- **17 ported MCP tools** — `get_taxonomy`, `get_aaak_spec`, `memories_filed_away`, `graph_stats`, `reconnect`, `create_tunnel`, `delete_tunnel`, `find_tunnels`, `follow_tunnels`, `list_tunnels`, `traverse`, `sync`, `hook_settings`, `rebuild_fts`, `update_drawer`, `check_duplicate`, `kg_timeline`
+- **Schema migration** — `migrate.py`: version-tracked FAISS rebuild + SQLite schema migration, dry-run mode
+- **Content-date extraction** — `miner.py`: `_extract_content_date()` with 5-fallback hierarchy (filename ISO → filename NL → frontmatter → content body → mtime)
+- **Entity detection mining** — `miner.py`: `mine_file_entity_lines()` mines per-line entity annotations alongside drawers
+- **Hook settings** — `config.py`: `get_hook_settings()` / `set_hook_settings()` for silent_save, desktop_toast, auto_save
+- **Project scanner enrichment** — `project_scanner.py`: `PersonInfo`/`ProjectInfo` dataclasses, `find_git_repos()`, `_dedupe_people()`, `to_detected_dict()`, `discover_entities()`, manifest parsers (package.json/pyproject.toml/Cargo.toml/go.mod), git author analysis, bot filtering
+- **Searcher strategy system** — `searcher.py`: `validate_candidate_strategy()`, `_merge_bm25_union_candidates()`, `expand_with_neighbors()`, `_CANDIDATE_MERGERS` dispatch (`"vector"` / `"union"` strategies)
+- **`initialize_dynamics_fields` wiring** — `hallways.py`: now calls `dynamics.initialize_dynamics_fields()` on each hallway record (strength/stability/access_count)
+- **`mine_lock`** — `palace.py`: per-palace re-entrant lock, `MineValidationError` for post-mine PRAGMA quick_check, `MineAlreadyRunning` exception
+- **Closet cleanup on sync** — `sync.py`: purges orphaned closets whose source files were deleted
+
+### Changed
+
+- **`scan()` return type** — second element is now `list[PersonInfo]` instead of `list[ProjectInfo]`
+- **`_hybrid_search()`** — uses `_get_closet_source_ids()` for +0.15 closet-boosted reranking
+- **Backend exports** — `__init__.py` re-exports `migrate`, `migrate_schema`, `rebuild_faiss`, `PersonInfo`, `find_git_repos`, `to_detected_dict`, `discover_entities`
+- **CLI** — added `migrate` subcommand with `--dry-run`
+
+### Fixes
+
+- `palace.py`: `get_taxonomy()` returns wing→room→drawer_count tree via GROUP BY
+- `palace.py`: `reconnect()` re-opens SQLite + FAISS + KG connections in-place
+- `palace.py`: `memories_filed_away()` returns `{total_drawers, last_saved_at, last_content_preview}`
+- `palace.py`: `update_drawer()` updates content + metadata + wing/room + FAISS index
+
 ## v4.0.0 (2026-05-29)
 
 Major restructuring and feature expansion. The codebase has been refactored from flat root-level files into a proper `kai_mempalace/` subpackage, and 6 major features from upstream MemPalace have been ported.

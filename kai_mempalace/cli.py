@@ -147,6 +147,14 @@ def main():
     for instr_name in ("init", "search", "mine", "help", "status"):
         instr_sub.add_parser(instr_name, help=f"Instructions for {instr_name}")
 
+    p_migrate = sub.add_parser("migrate", help="Schema migration and FAISS rebuild")
+    p_migrate.add_argument("--dry-run", "-n", action="store_true",
+                           help="Show pending migrations without applying")
+    p_migrate.add_argument("--rebuild-faiss", "-f", action="store_true",
+                           help="Rebuild FAISS index from SQLite data")
+    p_migrate.add_argument("--status", "-s", action="store_true",
+                           help="Show schema version and migration status")
+
     p_repair = sub.add_parser("repair", help="Repair utilities: integrity, VACUUM, FTS5 rebuild")
     p_repair.add_argument("--integrity", action="store_true", help="Check SQLite integrity")
     p_repair.add_argument("--vacuum", action="store_true", help="Run VACUUM")
@@ -370,6 +378,31 @@ def main():
         elif args.command == "instructions":
             from kai_mempalace.instructions_cli import run_instructions
             run_instructions(args.instr_command)
+
+        elif args.command == "migrate":
+            from kai_mempalace.migrate import migrate, rebuild_faiss, status as migrate_status
+            base = str(Path(args.palace).expanduser().resolve())
+
+            if args.status:
+                s = migrate_status(base)
+                print(f"Palace:   {s['path']}")
+                print(f"Version:  {s['version']} (latest: {s['latest_version']})")
+                print(f"Up to date: {s['up_to_date']}")
+                print(f"Drawers:  {s.get('drawers', '?')}")
+                print(f"Wings:    {s.get('wings', '?')}")
+                print(f"Rooms:    {s.get('rooms', '?')}")
+                print(f"Vectors:  {s.get('vectors', '?')}")
+            elif args.rebuild_faiss:
+                result = rebuild_faiss(base)
+                print(f"FAISS rebuild: {result['vectors_rebuilt']} vectors")
+            else:
+                result = migrate(base, dry_run=args.dry_run)
+                if args.dry_run:
+                    print(f"Pending migrations: {result['migrations_applied'] or 'none'}")
+                else:
+                    print(f"Version: {result['version_before']} -> {result['version_after']}")
+                    for m in result['migrations_applied']:
+                        print(f"  Applied: {m}")
 
         elif args.command == "repair":
             from kai_mempalace.repair_utils import (

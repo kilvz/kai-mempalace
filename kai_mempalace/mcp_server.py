@@ -20,6 +20,9 @@ except ImportError:
 from kai_mempalace import dialect
 from kai_mempalace.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
 from kai_mempalace.entity_registry import EntityRegistry
+from kai_mempalace import palace_graph
+from kai_mempalace.sync import sync_palace
+from kai_mempalace.config import KaiPalaceConfig
 
 try:
     from kai_mempalace.layers import MemoryStack
@@ -38,7 +41,410 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "3.3.6"
+VERSION = "4.1.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
+_TOOL_DEFINITIONS: list[dict] = []
+
+AAAK_SPEC = (
+    "AAAK is a compressed memory dialect that MemPalace uses for efficient storage. "
+    "It is designed to be readable by both humans and LLMs without decoding.\n\n"
+    "FORMAT:\n"
+    "  ENTITIES: 3-letter uppercase codes. ALC=Alice, JOR=Jordan, RIL=Riley, MAX=Max, BEN=Ben.\n"
+    "  EMOTIONS: *action markers* before/during text. *warm*=joy, *fierce*=determined, *raw*=vulnerable, *bloom*=tenderness.\n"
+    "  STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.\n"
+    "  DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).\n"
+    "  IMPORTANCE: ★ to ★★★★★ (1-5 scale).\n"
+    "  HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.\n"
+    "  WINGS: kai_mempalace, documents, reference, benchmark, agent_*\n"
+    "  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).\n\n"
+    "EXAMPLE:\n"
+    "  FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)\n\n"
+    "Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.\n"
+    "When WRITING AAAK: use entity codes, mark emotions, keep structure tight."
+)
+
+
+def _build_tool_definitions() -> list[dict]:
+    """Build MCP tool definitions from the registered methods."""
+    if _TOOL_DEFINITIONS:
+        return _TOOL_DEFINITIONS
+    tools = [
+        {
+            "name": "search",
+            "description": "Search across all palace drawers using hybrid (vector+keyword), vector-only, or keyword-only mode",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "n_results": {"type": "number", "description": "Max results to return (default 10)"},
+                    "wing": {"type": "string", "description": "Restrict to a wing"},
+                    "room": {"type": "string", "description": "Restrict to a room"},
+                    "mode": {"type": "string", "description": "Search mode: hybrid, vector, or keyword"},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "get_status",
+            "description": "Get palace status: drawer count, wing/room breakdown, embedding type",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_wings",
+            "description": "List all wings in the palace",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_rooms",
+            "description": "List rooms in a wing",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Wing name (optional; lists all rooms if omitted)"},
+                },
+            },
+        },
+        {
+            "name": "add_drawer",
+            "description": "Add a new drawer with content to a wing/room",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Wing name"},
+                    "room": {"type": "string", "description": "Room name"},
+                    "content": {"type": "string", "description": "Drawer content text"},
+                    "metadata": {"type": "object", "description": "Optional metadata dict"},
+                    "source_file": {"type": "string", "description": "Optional source file path"},
+                },
+                "required": ["wing", "room", "content"],
+            },
+        },
+        {
+            "name": "get_drawer",
+            "description": "Get a drawer by its ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawer_id": {"type": "string", "description": "Drawer ID"},
+                },
+                "required": ["drawer_id"],
+            },
+        },
+        {
+            "name": "delete_drawer",
+            "description": "Delete a drawer by its ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawer_id": {"type": "string", "description": "Drawer ID"},
+                },
+                "required": ["drawer_id"],
+            },
+        },
+        {
+            "name": "kg_add",
+            "description": "Add a fact to the knowledge graph",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject entity"},
+                    "predicate": {"type": "string", "description": "Relationship type"},
+                    "object": {"type": "string", "description": "Object entity"},
+                    "valid_from": {"type": "string", "description": "ISO date when fact becomes valid"},
+                    "valid_to": {"type": "string", "description": "ISO date when fact expires"},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        },
+        {
+            "name": "kg_query",
+            "description": "Query the knowledge graph for facts about an entity",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Entity name to query"},
+                    "predicate": {"type": "string", "description": "Filter by predicate"},
+                    "as_of": {"type": "string", "description": "ISO date to query temporally"},
+                    "all": {"type": "boolean", "description": "Return all facts"},
+                },
+            },
+        },
+        {
+            "name": "kg_invalidate",
+            "description": "Mark a knowledge graph fact as no longer true",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject entity"},
+                    "predicate": {"type": "string", "description": "Relationship type"},
+                    "object": {"type": "string", "description": "Object entity"},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        },
+        {
+            "name": "kg_stats",
+            "description": "Get knowledge graph statistics",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "diary_write",
+            "description": "Write a diary entry for an agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name"},
+                    "entry": {"type": "string", "description": "Diary entry text"},
+                    "topic": {"type": "string", "description": "Topic tag"},
+                },
+                "required": ["agent", "entry"],
+            },
+        },
+        {
+            "name": "diary_read",
+            "description": "Read recent diary entries for an agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name"},
+                    "last_n": {"type": "number", "description": "Number of entries to read"},
+                },
+                "required": ["agent"],
+            },
+        },
+        {
+            "name": "list_drawers",
+            "description": "List drawers with optional wing/room filter and pagination",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Filter by wing"},
+                    "room": {"type": "string", "description": "Filter by room"},
+                    "limit": {"type": "number", "description": "Max results (default 20)"},
+                    "offset": {"type": "number", "description": "Offset for pagination"},
+                },
+            },
+        },
+        {
+            "name": "mine_text",
+            "description": "Mine text content into the palace",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text content to mine"},
+                    "wing": {"type": "string", "description": "Target wing"},
+                    "room": {"type": "string", "description": "Target room"},
+                    "source": {"type": "string", "description": "Optional source identifier"},
+                },
+                "required": ["text", "wing", "room"],
+            },
+        },
+        {
+            "name": "aaak_compress",
+            "description": "Compress text using AAAK dialect",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to compress"},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": "aaak_decompress",
+            "description": "Decompress AAAK-encoded text",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "AAAK text to decompress"},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": "aaak_parse",
+            "description": "Parse a single AAAK entry into its components",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "AAAK entry text"},
+                },
+                "required": ["text"],
+            },
+        },
+    ]
+    _TOOL_DEFINITIONS.extend(tools)
+
+    # -- Tools missing from kai-palace (ported from mempalace upstream) --
+
+    extra_tools = [
+        {
+            "name": "update_drawer",
+            "description": "Update an existing drawer's content and/or metadata (wing, room)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawer_id": {"type": "string", "description": "Drawer ID"},
+                    "content": {"type": "string", "description": "New content (optional)"},
+                    "metadata": {"type": "object", "description": "New metadata (optional)"},
+                    "wing": {"type": "string", "description": "New wing (optional)"},
+                    "room": {"type": "string", "description": "New room (optional)"},
+                },
+                "required": ["drawer_id"],
+            },
+        },
+        {
+            "name": "check_duplicate",
+            "description": "Check if content already exists in the palace before filing",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Content to check"},
+                    "threshold": {"type": "number", "description": "Similarity threshold 0-1 (default 0.9)"},
+                },
+                "required": ["content"],
+            },
+        },
+        {
+            "name": "kg_timeline",
+            "description": "Chronological timeline of facts. Shows the story of an entity (or everything) in order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Entity to get timeline for (optional — omit for full timeline)"},
+                },
+            },
+        },
+        {
+            "name": "create_tunnel",
+            "description": "Create a cross-wing tunnel linking two palace locations",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_wing": {"type": "string", "description": "Wing of the source"},
+                    "source_room": {"type": "string", "description": "Room in the source wing"},
+                    "target_wing": {"type": "string", "description": "Wing of the target"},
+                    "target_room": {"type": "string", "description": "Room in the target wing"},
+                    "label": {"type": "string", "description": "Description of the connection"},
+                    "source_drawer_id": {"type": "string", "description": "Optional specific drawer ID"},
+                    "target_drawer_id": {"type": "string", "description": "Optional specific drawer ID"},
+                },
+                "required": ["source_wing", "source_room", "target_wing", "target_room"],
+            },
+        },
+        {
+            "name": "delete_tunnel",
+            "description": "Delete an explicit tunnel by its ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tunnel_id": {"type": "string", "description": "Tunnel ID to delete"},
+                },
+                "required": ["tunnel_id"],
+            },
+        },
+        {
+            "name": "find_tunnels",
+            "description": "Find rooms that bridge two wings — the hallways connecting different domains",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing_a": {"type": "string", "description": "First wing (optional)"},
+                    "wing_b": {"type": "string", "description": "Second wing (optional)"},
+                },
+            },
+        },
+        {
+            "name": "follow_tunnels",
+            "description": "Follow tunnels from a room to see what it connects to in other wings",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Wing to start from"},
+                    "room": {"type": "string", "description": "Room to follow tunnels from"},
+                },
+                "required": ["wing", "room"],
+            },
+        },
+        {
+            "name": "list_tunnels",
+            "description": "List all explicit cross-wing tunnels. Optionally filter by wing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Filter tunnels by wing"},
+                },
+            },
+        },
+        {
+            "name": "traverse",
+            "description": "Walk the palace graph from a room. Shows connected ideas across wings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "start_room": {"type": "string", "description": "Room to start from"},
+                    "max_hops": {"type": "number", "description": "How many connections to follow (default: 2)"},
+                },
+                "required": ["start_room"],
+            },
+        },
+        {
+            "name": "graph_stats",
+            "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_taxonomy",
+            "description": "Full taxonomy: wing → room → drawer count",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_aaak_spec",
+            "description": "Get the AAAK dialect specification — the compressed memory format",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "memories_filed_away",
+            "description": "Check if a recent palace checkpoint was saved. Returns drawer count and timestamp.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "sync",
+            "description": "Prune drawers whose source files are gitignored, deleted, or moved",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Project root to scope the sync"},
+                    "wing": {"type": "string", "description": "Limit to one wing"},
+                    "apply": {"type": "boolean", "description": "Actually delete drawers; default is dry-run preview"},
+                },
+            },
+        },
+        {
+            "name": "reconnect",
+            "description": "Force reconnect to the palace database. Use after external changes.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "hook_settings",
+            "description": "Get or set hook behavior. silent_save: True = save directly, desktop_toast: True = show notification.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "silent_save": {"type": "boolean", "description": "True = silent direct save"},
+                    "desktop_toast": {"type": "boolean", "description": "True = show desktop toast via notify-send"},
+                },
+            },
+        },
+        {
+            "name": "rebuild_fts",
+            "description": "Rebuild the FTS5 full-text search index from all drawer contents",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+    ]
+    _TOOL_DEFINITIONS.extend(extra_tools)
+    return _TOOL_DEFINITIONS
 
 
 class MCPServer:
@@ -56,6 +462,14 @@ class MCPServer:
         self._methods[name] = (handler, required or [])
 
     def _register_all(self):
+        # MCP protocol methods
+        self._register("initialize", self._mcp_initialize, [])
+        self._register("notifications/initialized", self._mcp_noop, [])
+        self._register("notifications/notified", self._mcp_noop, [])
+        self._register("tools/list", self._mcp_tools_list, [])
+        self._register("tools/call", self._mcp_tools_call, ["name", "arguments"])
+
+        # Legacy JSON-RPC methods
         self._register("ping", self._ping, [])
         self._register("get_status", self._get_status, [])
         self._register("init_palace", self._init_palace, [])
@@ -100,9 +514,23 @@ class MCPServer:
 
         self._register("rebuild_fts", self._rebuild_fts, [])
 
+        # New tools ported from mempalace upstream
+        self._register("create_tunnel", self._create_tunnel, ["source_wing", "source_room", "target_wing", "target_room"])
+        self._register("delete_tunnel", self._delete_tunnel, ["tunnel_id"])
+        self._register("find_tunnels", self._find_tunnels, [])
+        self._register("follow_tunnels", self._follow_tunnels, ["wing", "room"])
+        self._register("list_tunnels", self._list_tunnels, [])
+        self._register("traverse", self._traverse, ["start_room"])
+        self._register("graph_stats", self._graph_stats, [])
+        self._register("get_taxonomy", self._get_taxonomy, [])
+        self._register("get_aaak_spec", self._get_aaak_spec, [])
+        self._register("memories_filed_away", self._memories_filed_away, [])
+        self._register("sync", self._sync, [])
+        self._register("reconnect", self._reconnect, [])
+        self._register("hook_settings", self._hook_settings, [])
+
     def handle_request(self, raw: str) -> str | None:
         """Process one JSON-RPC request line, return JSON response string.
-
         Returns None for notifications (no ``id`` field).
         """
         try:
@@ -140,6 +568,32 @@ class MCPServer:
             if logger.isEnabledFor(logging.DEBUG):
                 err["error"]["data"] = traceback.format_exc()
             return json.dumps(err)
+
+    # -- MCP protocol handlers ---------------------------------------------------
+
+    def _mcp_initialize(self, params: dict) -> dict:
+        return {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "kai-palace", "version": VERSION},
+        }
+
+    def _mcp_noop(self, params: dict) -> dict:
+        return {}
+
+    def _mcp_tools_list(self, params: dict) -> dict:
+        return {"tools": _build_tool_definitions()}
+
+    def _mcp_tools_call(self, params: dict) -> dict:
+        name = params["name"]
+        args = params.get("arguments", {})
+        handler_info = self._methods.get(name)
+        if handler_info is None:
+            raise ValueError(f"Unknown tool: {name}")
+        handler, required = handler_info
+        result = handler(args)
+        text = json.dumps(result, indent=2, ensure_ascii=False) if not isinstance(result, str) else str(result)
+        return {"content": [{"type": "text", "text": text}]}
 
     # -- Handler implementations ------------------------------------------------
 
@@ -273,9 +727,6 @@ class MCPServer:
     def _kg_stats(self, params: dict) -> dict:
         return self.palace.kg.stats()
 
-    def _kg_timeline(self, params: dict) -> list:
-        return self.palace.kg.timeline(entity=params.get("entity"))
-
     def _diary_write(self, params: dict) -> dict:
         wing = self.palace.diary_write(
             params["agent"],
@@ -354,6 +805,83 @@ class MCPServer:
     def _rebuild_fts(self, params: dict) -> dict:
         self.palace.rebuild_fts()
         return {"rebuilt": True}
+
+    def _kg_timeline(self, params: dict) -> list:
+        return self.palace.kg.timeline(entity=params.get("entity"))
+
+    def _create_tunnel(self, params: dict) -> dict:
+        tunnel = palace_graph.create_tunnel(
+            source_wing=params["source_wing"],
+            source_room=params["source_room"],
+            target_wing=params["target_wing"],
+            target_room=params["target_room"],
+            label=params.get("label", ""),
+            source_drawer_id=params.get("source_drawer_id"),
+            target_drawer_id=params.get("target_drawer_id"),
+        )
+        return tunnel
+
+    def _delete_tunnel(self, params: dict) -> dict:
+        return palace_graph.delete_tunnel(params["tunnel_id"])
+
+    def _find_tunnels(self, params: dict) -> list:
+        return palace_graph.find_tunnels(
+            wing_a=params.get("wing_a"),
+            wing_b=params.get("wing_b"),
+        )
+
+    def _follow_tunnels(self, params: dict) -> list:
+        return palace_graph.follow_tunnels(
+            params["wing"],
+            params["room"],
+            palace=self.palace,
+        )
+
+    def _list_tunnels(self, params: dict) -> list:
+        return palace_graph.list_tunnels(wing=params.get("wing"))
+
+    def _traverse(self, params: dict) -> list:
+        result = palace_graph.traverse(
+            start_room=params["start_room"],
+            palace=self.palace,
+            max_hops=params.get("max_hops", 2),
+        )
+        return result
+
+    def _graph_stats(self, params: dict) -> dict:
+        return palace_graph.graph_stats(palace=self.palace)
+
+    def _get_taxonomy(self, params: dict) -> dict:
+        return self.palace.get_taxonomy()
+
+    def _get_aaak_spec(self, params: dict) -> str:
+        return AAAK_SPEC
+
+    def _memories_filed_away(self, params: dict) -> dict:
+        return self.palace.memories_filed_away()
+
+    def _sync(self, params: dict) -> dict:
+        project_dirs = [params["project_dir"]] if params.get("project_dir") else None
+        report = sync_palace(
+            palace_path=self.palace._base,
+            project_dirs=project_dirs,
+            wing=params.get("wing"),
+            dry_run=not params.get("apply", False),
+        )
+        return dict(report)
+
+    def _reconnect(self, params: dict) -> dict:
+        ok = self.palace.reconnect()
+        return {"reconnected": ok}
+
+    def _hook_settings(self, params: dict) -> dict:
+        config = KaiPalaceConfig()
+        if params:
+            return config.set_hook_settings(
+                silent_save=params.get("silent_save"),
+                desktop_toast=params.get("desktop_toast"),
+            )
+        return config.get_hook_settings()
 
     # -- Helpers ----------------------------------------------------------------
 

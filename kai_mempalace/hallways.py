@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional
 
+from kai_mempalace.dynamics import initialize_dynamics_fields
 from kai_mempalace.palace import Palace
 
 logger = logging.getLogger("kai_mempalace_hallways")
@@ -288,11 +289,10 @@ def compute_hallways_for_wing(
             "created_by": "auto",
         }
         # Apply preserved dynamics if this entity pair existed in the
-        # prior wing snapshot.
+        # prior wing snapshot, then initialize any missing fields.
         preserved = existing_dynamics_lookup.get(key, {})
         record.update(preserved)
-        # NOTE: initialize_dynamics_fields intentionally omitted —
-        #       kai-mempalace does not include that LLM-dependent module.
+        initialize_dynamics_fields(record)
         created.append(record)
 
     # 4. Persist — preserve other-wing records, replace this wing's records.

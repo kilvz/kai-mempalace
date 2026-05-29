@@ -294,6 +294,28 @@ class KaiPalaceConfig:
             return val.lower() in ("true", "1", "yes", "on")
         return bool(self._file_config.get("hook_desktop_toast", False))
 
+    def get_hook_settings(self) -> dict:
+        return {
+            "silent_save": self.hook_silent_save,
+            "desktop_toast": self.hook_desktop_toast,
+            "auto_save": self.hooks_auto_save,
+        }
+
+    def set_hook_settings(self, silent_save: bool = None, desktop_toast: bool = None, auto_save: bool = None) -> dict:
+        if silent_save is not None:
+            self._file_config["hook_silent_save"] = bool(silent_save)
+        if desktop_toast is not None:
+            self._file_config["hook_desktop_toast"] = bool(desktop_toast)
+        if auto_save is not None:
+            self._file_config["hooks_auto_save"] = bool(auto_save)
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._config_file, "w", encoding="utf-8") as f:
+                json.dump(self._file_config, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+        return self.get_hook_settings()
+
     def init(self):
         self._config_dir.mkdir(parents=True, exist_ok=True)
         if not self._config_file.exists():

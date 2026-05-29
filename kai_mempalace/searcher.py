@@ -97,6 +97,126 @@ def _extract_drawer_ids_from_closet(closet_doc: str) -> list[str]:
     return list(seen.keys())
 
 
+# ── Candidate strategy system ──────────────────────────────────────────
+
+
+def _merge_bm25_union_candidates(
+    hits: list,
+    query: str,
+    keyword_results: list,
+    n_results: int,
+    max_distance: float = 0.0,
+) -> None:
+    """Append top-K BM25-only candidates into ``hits`` in place.
+
+    Used by ``candidate_strategy="union"`` to widen the rerank pool beyond
+    vector-only candidates — catches docs with strong BM25 signal that are
+    vector-distant from the query.
+
+    BM25-only additions carry ``distance=None`` so ``_hybrid_rank`` scores
+    them on BM25 contribution alone.
+
+    When ``max_distance > 0.0``, BM25-only candidates are skipped —
+    they have no vector distance to satisfy the threshold.
+    """
+    if max_distance > 0.0:
+        return
+    if not keyword_results:
+        return
+
+    seen_keys = {_dedup_key(h) for h in hits}
+    for kr in keyword_results:
+        key = _dedup_key(kr)
+        if not key or key == "?" or key in seen_keys:
+            continue
+        kr["distance"] = None
+        hits.append(kr)
+        seen_keys.add(key)
+
+
+def _dedup_key(entry: dict) -> str:
+    src = entry.get("source_file") or entry.get("metadata", {}).get("source_file")
+    return src or "?"
+
+
+_CANDIDATE_MERGERS = {
+    "vector": None,
+    "union": _merge_bm25_union_candidates,
+}
+
+
+def validate_candidate_strategy(strategy: str) -> None:
+    if strategy not in _CANDIDATE_MERGERS:
+        raise ValueError(
+            f"candidate_strategy must be one of {tuple(_CANDIDATE_MERGERS)}, got {strategy!r}"
+        )
+
+
+def apply_candidate_strategy(
+    strategy: str,
+    hits: list,
+    query: str,
+    keyword_results: list,
+    n_results: int,
+    max_distance: float = 0.0,
+) -> None:
+    merger = _CANDIDATE_MERGERS[strategy]
+    if merger is not None:
+        merger(hits, query, keyword_results, n_results, max_distance=max_distance)
+
+
+# ── Neighbor chunk expansion ───────────────────────────────────────────
+
+
+def expand_with_neighbors(
+    row: tuple,
+    db,
+    radius: int = 1,
+) -> dict:
+    """Expand a matched drawer with its *radius* sibling chunks in the same source file.
+
+    Returns a dict with ``text`` (combined chunks), ``drawer_index``, and
+    ``total_drawers`` for the source file.
+    """
+    rid, content, meta_json = row[0], row[3] if len(row) > 3 else "", row[4] if len(row) > 4 else "{}"
+    try:
+        meta = __import__("json").loads(meta_json) if isinstance(meta_json, str) else meta_json
+    except Exception:
+        meta = {}
+    src = meta.get("source_file")
+    chunk_idx = meta.get("chunk_index")
+    if not src or not isinstance(chunk_idx, int):
+        return {"text": content, "drawer_index": chunk_idx, "total_drawers": None}
+
+    target_indexes = [chunk_idx + offset for offset in range(-radius, radius + 1)]
+    try:
+        cursor = db.execute(
+            "SELECT id, wing, room, content, metadata FROM drawers WHERE source_file = ?",
+            (src,),
+        )
+        all_docs = cursor.fetchall()
+    except Exception:
+        return {"text": content, "drawer_index": chunk_idx, "total_drawers": None}
+
+    indexed = []
+    for d in all_docs:
+        try:
+            m = __import__("json").loads(d[4]) if isinstance(d[4], str) else d[4]
+        except Exception:
+            m = {}
+        ci = m.get("chunk_index")
+        if isinstance(ci, int) and ci in target_indexes:
+            indexed.append((ci, d[3]))
+    indexed.sort(key=lambda p: p[0])
+
+    combined = "\n\n".join(doc for _, doc in indexed) if indexed else content
+    return {
+        "text": combined,
+        "drawer_index": chunk_idx,
+        "total_drawers": len(all_docs),
+    }
+
+
 # ── Virtual line numbering (read-time grid for drawers) ─────────────────
 
 

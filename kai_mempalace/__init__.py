@@ -1,6 +1,6 @@
-"""Kai MemPalace v3.3.6 — FAISS-powered memory palace with hybrid search, entity graph, and MCP."""
+"""Kai MemPalace v4.1.0 — FAISS-powered memory palace with hybrid search, entity graph, MCP server, and 35 MCP tools."""
 
-__version__ = "3.3.6"
+__version__ = "4.1.0"
 
 from kai_mempalace.palace import Palace, SearchResult, mine_lock, MineAlreadyRunning
 from kai_mempalace.backends.embedder import NumpyEmbedder, get_embedder
@@ -15,6 +15,7 @@ from kai_mempalace.dialect import (
 )
 from kai_mempalace.layers import MemoryStack
 from kai_mempalace.entity_detector import EntityDetector
+from kai_mempalace.migrate import migrate, migrate_schema, rebuild_faiss, get_palace_version, set_palace_version
 from kai_mempalace.entity_registry import EntityRegistry
 from kai_mempalace.miner import (
     mine_file_into_palace,
@@ -48,7 +49,10 @@ from kai_mempalace.general_extractor import extract_memories
 from kai_mempalace.room_detector_local import detect_rooms_local
 from kai_mempalace.fact_checker import check_text
 from kai_mempalace.onboarding import run_onboarding, quick_setup
-from kai_mempalace.project_scanner import ProjectInfo, scan
+from kai_mempalace.project_scanner import (
+    ProjectInfo, PersonInfo, scan, find_git_repos,
+    to_detected_dict, discover_entities, _dedupe_people,
+)
 from kai_mempalace.convo_scanner import scan_claude_projects, is_claude_projects_root
 
 __all__ = [
@@ -63,6 +67,11 @@ __all__ = [
     "MemoryStack",
     "EntityDetector",
     "EntityRegistry",
+    "migrate",
+    "migrate_schema",
+    "rebuild_faiss",
+    "get_palace_version",
+    "set_palace_version",
     "aaak_compress",
     "aaak_decompress",
     "aaak_parse_entry",
@@ -102,7 +111,12 @@ __all__ = [
     "run_onboarding",
     "quick_setup",
     "ProjectInfo",
+    "PersonInfo",
     "scan",
+    "find_git_repos",
+    "to_detected_dict",
+    "discover_entities",
+    "_dedupe_people",
     "scan_claude_projects",
     "is_claude_projects_root",
 ]

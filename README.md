@@ -1,6 +1,6 @@
 # Kai MemPalace
 
-> Local-first AI memory system. Fork of [MemPalace](https://github.com/mempalace/mempalace).
+> Local-first AI memory system. Fork of [MemPalace](https://github.com/mempalace/mempalace). v4.1.0 — **35 MCP tools**, FAISS backend, musl-compatible.
 
 Replaces ChromaDB/onnxruntime with **FAISS + numpy TF-IDF/SVD embeddings** — runs on Alpine Linux aarch64 and any musl-based platform.
 
@@ -10,14 +10,16 @@ Replaces ChromaDB/onnxruntime with **FAISS + numpy TF-IDF/SVD embeddings** — r
 |---|---|---|
 | Vector store | ChromaDB | FAISS (IndexFlatIP) |
 | Embeddings | ONNX MiniLM-L6-v2 (384-dim) | TF-IDF → scipy TruncatedSVD (384-dim) |
-| Dependencies | onnxruntime, chromadb | faiss-cpu, numpy, scipy only |
+| Dependencies | onnxruntime, chromadb, grpcio | faiss-cpu, numpy, scipy only |
 | Platform | glibc Linux, macOS, Windows | Alpine, aarch64, any musl-based |
 | API calls | Zero (local) | Zero (local) |
 | Vector persistence | ChromaDB managed | Raw vectors stored as SQLite blobs |
 | Entity registry | JSON-file backed | KnowledgeGraph backed |
 | Wiki lookup | Wikipedia REST API (opt-in) | Wikipedia REST API (opt-in), KG-cached |
 | Search modes | vector, keyword, hybrid | vector, keyword (FTS5), hybrid + closet boost |
-| Project scanner | Manifest + git author analysis | Same, plus bot filtering, PersonInfo dataclass |
+| MCP tools | 29 | **35** (info, tunnel, graph, management, KG, diary) |
+| Schema migration | Manual | Version-tracked migrate + FAISS rebuild |
+| Project scanner | Manifest + git authors | Same + bot filtering, discover_entities(), dedup |
 
 ## Architecture
 
@@ -34,16 +36,21 @@ kai_mempalace/
 ├── palace_graph.py         # Cross-wing tunnel computation
 ├── sweeper.py              # Message-granular session miner
 ├── entity_registry.py      # KG-backed entity registry + wiki lookup
-├── entity_detector.py      # Regex + heuristic NER
-├── project_scanner.py      # Manifest + git history analysis
-├── searcher.py             # Search routing & reranking
+├── entity_detector.py      # Regex + heuristic NER, confirm_entities()
+├── project_scanner.py      # Manifest + git history + discover_entities()
+├── searcher.py             # BM25 ranking, strategy system, neighbor expansion
 ├── cli.py                  # Full CLI (24+ commands)
 ├── convo_miner.py          # Conversation transcript mining
 ├── llm_refine.py           # LLM-based entity refinement
-├── miner.py                # File-level memory mining
+├── miner.py                # File-level + entity-line mining
+├── mcp_server.py           # MCP protocol server (35 tools)
+├── migrate.py              # Schema migration + FAISS rebuild
+├── sync.py                 # Closet cleanup + palace sync
+├── hallways.py             # Entity co-occurrence hallways
+├── dynamics.py             # Hebbian potentiation + Ebbinghaus decay
 ├── sources/                # Source file abstraction layer
 ├── instructions/           # Help text for CLI
-└── i18n/                   # Internationalization (10+ locales)
+└── i18n/                   # Internationalization (14 locales)
 ```
 
 ## Quick start
@@ -80,15 +87,25 @@ kai-mempalace status
 | `sweep` | Ingest session transcripts |
 | `scan` | Detect projects and people from codebase |
 
-## New in v4.0.0
+## New in v4.1.0
 
-- **FTS5 proximity search** — prefix wildcards, AND/OR/NOT/NEAR operators
-- **Wikipedia entity lookup** — opt-in network research, KG-cached
-- **Interactive entity confirmation** — review/accept/reject/rename detected entities
-- **Project scanner enrichment** — `PersonInfo` dataclass, git author extraction, bot filtering
-- **Sweeper TTL config** — `skip_before`, `exclude_patterns`, `dry_run` modes
-- **Closet-boosted reranking** — results from files referenced in closets get +0.15 rank boost
-- **Module restructuring** — flat root files refactored into `kai_mempalace/` subpackage
+- **MCP protocol server** — stdio transport, 35 tools (up from 18)
+- **17 new MCP tools** — taxonomy, graph stats, tunnels (create/delete/list/follow/traverse/find), sync, hook settings, rebuild FTS, update drawer, check duplicate, KG timeline, reconnect, AAAK spec
+- **Schema migration** — `migrate` command with version-tracked FAISS rebuild
+- **Content-date extraction** — 5-fallback hierarchy, auto-tagged on mine
+- **Project scanner** — `PersonInfo`/`ProjectInfo` dataclasses, `discover_entities()`, git author + manifest analysis
+- **Search strategy system** — `"vector"` / `"union"` candidate modes, neighbor expansion
+- **Entity-line mining** — per-line entity annotations alongside drawers
+- **Hallway dynamics** — `initialize_dynamics_fields` wired (strength/stability/access_count)
+- **Closet cleanup** — orphaned closets purged on sync
+
+## v4.0.0 features
+
+- FTS5 proximity search — prefix wildcards, AND/OR/NOT/NEAR operators
+- Wikipedia entity lookup — opt-in network research, KG-cached
+- Interactive entity confirmation — review/accept/reject/rename detected entities
+- Closet-boosted reranking — +0.15 rank boost from closet hits
+- Module restructuring — flat root files refactored into `kai_mempalace/` subpackage
 
 ## License
 

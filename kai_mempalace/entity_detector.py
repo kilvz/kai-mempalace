@@ -7,10 +7,14 @@ no external ML models or dependencies beyond stdlib.
 
 import functools
 import json
+import os
 import re
 import logging
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+from kai_mempalace.i18n import get_entity_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -911,3 +915,307 @@ class EntityDetector:
                 registry.register(entity["name"], source="user-confirmed")
 
         return confirmed, rejected
+
+
+# ==================== MODULE-LEVEL ENTITY DETECTION (i18n multi-language) ====================
+
+
+def _normalize_langs(languages) -> tuple:
+    if not languages:
+        return ("en",)
+    if isinstance(languages, str):
+        return (languages,)
+    return tuple(languages)
+
+
+@functools.lru_cache(maxsize=32)
+def _get_stopwords(languages: tuple) -> frozenset:
+    patterns = get_entity_patterns(languages)
+    return frozenset(patterns["stopwords"])
+
+
+def extract_candidates(text: str, languages=("en",)) -> dict:
+    langs = _normalize_langs(languages)
+    patterns = get_entity_patterns(langs)
+    stopwords = _get_stopwords(langs)
+    coca_filter = _get_coca_filter()
+
+    counts: defaultdict = defaultdict(int)
+
+    working_text, compound_counts = _apply_known_systems_prepass(text)
+    for compound, n in compound_counts.items():
+        counts[compound] += n
+
+    for wrapped_pat in patterns["candidate_patterns"]:
+        try:
+            rx = re.compile(wrapped_pat)
+        except re.error:
+            continue
+        for word in rx.findall(working_text):
+            wl = word.lower()
+            if wl in stopwords:
+                continue
+            if wl in coca_filter:
+                continue
+            if len(word) < 2:
+                continue
+            counts[word] += 1
+
+    for wrapped_pat in patterns["multi_word_patterns"]:
+        try:
+            rx = re.compile(wrapped_pat)
+        except re.error:
+            continue
+        for phrase in rx.findall(working_text):
+            if any(w.lower() in stopwords for w in phrase.split()):
+                continue
+            counts[phrase] += 1
+
+    return {name: count for name, count in counts.items() if count >= 3}
+
+
+def score_entity(name: str, text: str, lines: list, languages=("en",)) -> dict:
+    langs = _normalize_langs(languages)
+    n = re.escape(name)
+    patterns = get_entity_patterns(langs)
+
+    def _compile(raw_patterns, flags=re.IGNORECASE):
+        compiled = []
+        for p in raw_patterns:
+            try:
+                compiled.append(re.compile(p.format(name=n), flags))
+            except (re.error, KeyError, IndexError):
+                continue
+        return compiled
+
+    dialogue_rx = _compile(patterns["dialogue_patterns"], re.MULTILINE | re.IGNORECASE)
+    person_verb_rx = _compile(patterns["person_verb_patterns"])
+    project_verb_rx = _compile(patterns["project_verb_patterns"])
+
+    direct_raw = patterns.get("direct_address_patterns") or []
+    direct_rx = []
+    for raw in direct_raw:
+        try:
+            direct_rx.append(re.compile(raw.format(name=n), re.IGNORECASE))
+        except (re.error, KeyError, IndexError):
+            continue
+
+    versioned_rx = re.compile(rf"\b{n}[-_]v?\d+(?:\.\d+)*\b", re.IGNORECASE)
+    code_ref_rx = re.compile(rf"\b{n}\.(py|js|ts|yaml|yml|json|sh)\b", re.IGNORECASE)
+
+    pronouns = patterns.get("pronoun_patterns") or []
+    pronoun_re = None
+    if pronouns:
+        try:
+            pronoun_re = re.compile("|".join(pronouns), re.IGNORECASE)
+        except re.error:
+            pass
+
+    person_score = 0
+    project_score = 0
+    person_signals = []
+    project_signals = []
+
+    for rx in dialogue_rx:
+        matches = len(rx.findall(text))
+        if matches == 0:
+            continue
+        is_bare_colon = rx.pattern.endswith(r":\s") and not rx.pattern.endswith(r"[:\s]")
+        if is_bare_colon and matches < 2:
+            continue
+        person_score += matches * 3
+        person_signals.append(f"dialogue marker ({matches}x)")
+
+    for rx in person_verb_rx:
+        matches = len(rx.findall(text))
+        if matches > 0:
+            person_score += matches * 2
+            person_signals.append(f"'{name} ...' action ({matches}x)")
+
+    if pronoun_re is not None:
+        name_lower = name.lower()
+        name_line_indices = [i for i, line in enumerate(lines) if name_lower in line.lower()]
+        pronoun_hits = 0
+        for idx in name_line_indices:
+            window_text = " ".join(lines[max(0, idx - 2): idx + 3])
+            if pronoun_re.search(window_text):
+                pronoun_hits += 1
+        if pronoun_hits > 0:
+            person_score += pronoun_hits * 2
+            person_signals.append(f"pronoun nearby ({pronoun_hits}x)")
+
+    direct_hits = 0
+    for rx in direct_rx:
+        direct_hits += len(rx.findall(text))
+    if direct_hits > 0:
+        person_score += direct_hits * 4
+        person_signals.append(f"addressed directly ({direct_hits}x)")
+
+    for rx in project_verb_rx:
+        matches = len(rx.findall(text))
+        if matches > 0:
+            project_score += matches * 2
+            project_signals.append(f"project verb ({matches}x)")
+
+    versioned = len(versioned_rx.findall(text))
+    if versioned > 0:
+        project_score += versioned * 3
+        project_signals.append(f"versioned/hyphenated ({versioned}x)")
+
+    code_ref = len(code_ref_rx.findall(text))
+    if code_ref > 0:
+        project_score += code_ref * 3
+        project_signals.append(f"code file reference ({code_ref}x)")
+
+    return {
+        "person_score": person_score,
+        "project_score": project_score,
+        "person_signals": person_signals[:3],
+        "project_signals": project_signals[:3],
+    }
+
+
+def classify_entity(name: str, frequency: int, scores: dict) -> dict:
+    ps = scores["person_score"]
+    prs = scores["project_score"]
+    total = ps + prs
+
+    if total == 0:
+        confidence = min(0.4, frequency / 50)
+        return {
+            "name": name,
+            "type": "uncertain",
+            "confidence": round(confidence, 2),
+            "frequency": frequency,
+            "signals": [f"appears {frequency}x, no strong type signals"],
+        }
+
+    person_ratio = ps / total
+
+    signal_categories = set()
+    for s in scores["person_signals"]:
+        if "dialogue" in s:
+            signal_categories.add("dialogue")
+        elif "action" in s:
+            signal_categories.add("action")
+        elif "pronoun" in s:
+            signal_categories.add("pronoun")
+        elif "addressed" in s:
+            signal_categories.add("addressed")
+
+    has_two_signal_types = len(signal_categories) >= 2
+    pronoun_hits = 0
+    for s in scores["person_signals"]:
+        m = re.search(r"pronoun nearby \((\d+)x\)", s)
+        if m:
+            pronoun_hits = int(m.group(1))
+            break
+    strong_pronoun_signal = pronoun_hits >= 5 and frequency > 0 and pronoun_hits / frequency >= 0.2
+
+    if person_ratio >= 0.7 and (has_two_signal_types and ps >= 5 or strong_pronoun_signal):
+        entity_type = "person"
+        confidence = min(0.99, 0.5 + person_ratio * 0.5)
+        signals = scores["person_signals"] or [f"appears {frequency}x"]
+    elif person_ratio >= 0.7:
+        entity_type = "uncertain"
+        confidence = 0.4
+        signals = scores["person_signals"] + [f"appears {frequency}x — weak person signal"]
+    elif person_ratio <= 0.3:
+        entity_type = "project"
+        confidence = min(0.99, 0.5 + (1 - person_ratio) * 0.5)
+        signals = scores["project_signals"] or [f"appears {frequency}x"]
+    else:
+        entity_type = "uncertain"
+        confidence = 0.5
+        signals = (scores["person_signals"] + scores["project_signals"])[:3]
+        signals.append("mixed signals — needs review")
+
+    return {
+        "name": name,
+        "type": entity_type,
+        "confidence": round(confidence, 2),
+        "frequency": frequency,
+        "signals": signals,
+    }
+
+
+def detect_entities(
+    file_paths: list,
+    max_files: int = 10,
+    languages=("en",),
+    corpus_origin: dict | None = None,
+) -> dict:
+    langs = _normalize_langs(languages)
+
+    all_text = []
+    all_lines = []
+    files_read = 0
+    MAX_BYTES_PER_FILE = 5000
+
+    for filepath in file_paths:
+        if files_read >= max_files:
+            break
+        try:
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                content = f.read(MAX_BYTES_PER_FILE)
+            all_text.append(content)
+            all_lines.extend(content.splitlines())
+            files_read += 1
+        except OSError:
+            continue
+
+    combined_text = "\n".join(all_text)
+    candidates = extract_candidates(combined_text, languages=langs)
+
+    if not candidates:
+        return {"people": [], "projects": [], "topics": [], "uncertain": []}
+
+    people = []
+    projects = []
+    uncertain = []
+
+    for name, frequency in sorted(candidates.items(), key=lambda x: x[1], reverse=True):
+        scores = score_entity(name, combined_text, all_lines, languages=langs)
+        entity = classify_entity(name, frequency, scores)
+        if entity["type"] == "person":
+            people.append(entity)
+        elif entity["type"] == "project":
+            projects.append(entity)
+        else:
+            uncertain.append(entity)
+
+    people.sort(key=lambda x: x["confidence"], reverse=True)
+    projects.sort(key=lambda x: x["confidence"], reverse=True)
+    uncertain.sort(key=lambda x: x["frequency"], reverse=True)
+
+    detected = {
+        "people": people[:15],
+        "projects": projects[:10],
+        "topics": [],
+        "uncertain": uncertain[:8],
+    }
+
+    if corpus_origin is not None:
+        from kai_mempalace.entity_detector import _apply_corpus_origin
+        detected = _apply_corpus_origin(detected, corpus_origin)
+
+    return detected
+
+
+def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
+    project_path = Path(project_dir).expanduser().resolve()
+    prose_files = []
+    all_files = []
+
+    for root, dirs, filenames in os.walk(project_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for filename in filenames:
+            filepath = Path(root) / filename
+            ext = filepath.suffix.lower()
+            if ext in PROSE_EXTENSIONS:
+                prose_files.append(filepath)
+            elif ext in {".py", ".js", ".ts", ".json", ".yaml", ".yml", ".rst", ".toml", ".sh", ".rb", ".go", ".rs"}:
+                all_files.append(filepath)
+
+    files = prose_files if len(prose_files) >= 3 else prose_files + all_files
+    return files[:max_files]

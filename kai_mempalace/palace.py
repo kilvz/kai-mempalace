@@ -51,6 +51,19 @@ class MineAlreadyRunning(RuntimeError):
     """Raised when another mine already holds the per-palace lock."""
 
 
+class MineValidationError(RuntimeError):
+    """Raised at end of mine when PRAGMA quick_check reports errors."""
+
+    def __init__(self, palace_path: str, errors: list[str]) -> None:
+        if not errors:
+            raise ValueError("MineValidationError requires at least one error string")
+        if not palace_path:
+            raise ValueError("MineValidationError requires a non-empty palace_path")
+        super().__init__(f"FTS5/SQLite quick_check failed: {len(errors)} issue(s)")
+        self.palace_path = palace_path
+        self.errors: tuple[str, ...] = tuple(errors)
+
+
 @contextlib.contextmanager
 def mine_lock(source_file: str):
     """Cross-platform file lock for mine operations."""
@@ -80,6 +93,181 @@ def mine_lock(source_file: str):
         except Exception:
             logger.debug("Mine-lock release failed", exc_info=True)
         lf.close()
+
+
+# ── Per-palace mine lock (non-blocking, re-entrant) ─────────────────────
+
+
+import threading as _threading
+
+_palace_lock_holders = _threading.local()
+
+
+def _holder_state():
+    keys = getattr(_palace_lock_holders, "keys", None)
+    pid = getattr(_palace_lock_holders, "pid", None)
+    current_pid = os.getpid()
+    if keys is None or pid != current_pid:
+        keys = set()
+        _palace_lock_holders.keys = keys
+        _palace_lock_holders.pid = current_pid
+    return keys
+
+
+def _held_by_this_thread(lock_key: str) -> bool:
+    return lock_key in _holder_state()
+
+
+def _mark_held(lock_key: str) -> None:
+    _holder_state().add(lock_key)
+
+
+def _mark_released(lock_key: str) -> None:
+    _holder_state().discard(lock_key)
+
+
+_LOCK_SENTINEL_BYTES = 1
+
+
+def _read_lock_holder(lock_file) -> str:
+    try:
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
+        content = lock_file.read()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        content = content.strip()
+    except OSError:
+        return "another writer (identity not recorded)"
+    if not content:
+        return "another writer (identity not recorded)"
+    parts = content.split(maxsplit=1)
+    pid = parts[0] if parts else "?"
+    cmd = parts[1].strip() if len(parts) > 1 else ""
+    return f"PID {pid} ({cmd})" if cmd else f"PID {pid}"
+
+
+def _write_lock_holder(lock_file) -> None:
+    try:
+        import sys as _sys
+        ident = f"{os.getpid()} {' '.join(_sys.argv[:3])}".strip()
+        ident_bytes = ident.encode("utf-8")
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
+        lock_file.truncate(_LOCK_SENTINEL_BYTES + len(ident_bytes))
+        lock_file.write(ident_bytes)
+        lock_file.flush()
+    except (OSError, UnicodeError):
+        pass
+
+
+@contextlib.contextmanager
+def mine_palace_lock(palace_path: str):
+    """Per-palace non-blocking lock around the full mine pipeline.
+
+    Non-blocking: raises MineAlreadyRunning if another mine is active on
+    this palace. Re-entrant: same thread passes through without re-acquiring.
+    """
+    lock_dir = os.path.join(os.path.expanduser("~"), ".kai-palace", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    resolved = os.path.realpath(os.path.expanduser(palace_path))
+    lock_key_source = os.path.normcase(resolved)
+    import hashlib as _hashlib
+    palace_key = _hashlib.sha256(lock_key_source.encode()).hexdigest()[:16]
+    lock_path = os.path.join(lock_dir, f"mine_palace_{palace_key}.lock")
+
+    if _held_by_this_thread(palace_key):
+        yield
+        return
+
+    if not os.path.exists(lock_path):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+    lf = open(lock_path, "r+b")
+    acquired = False
+    try:
+        lf.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError as exc:
+                holder = _read_lock_holder(lf)
+                raise MineAlreadyRunning(
+                    f"palace {resolved} is held by {holder}; "
+                    "wait for it to finish or stop the holder before retrying"
+                ) from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError as exc:
+                holder = _read_lock_holder(lf)
+                raise MineAlreadyRunning(
+                    f"palace {resolved} is held by {holder}; "
+                    "wait for it to finish or stop the holder before retrying"
+                ) from exc
+        _write_lock_holder(lf)
+        _mark_held(palace_key)
+        try:
+            yield
+        finally:
+            _mark_released(palace_key)
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    lf.seek(0)
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+            except Exception:
+                pass
+        lf.close()
+
+
+def _validate_palace_fts5_after_mine(palace_path: str) -> None:
+    """Raise MineValidationError if SQLite quick_check reports errors after a mine."""
+    from kai_mempalace.repair_utils import sqlite_integrity_errors
+    errors = sqlite_integrity_errors(str(Path(palace_path).expanduser() / "palace.db"))
+    if errors:
+        raise MineValidationError(palace_path, errors)
+
+
+def bulk_check_mined(palace_path: str) -> dict[str, float]:
+    """Return dict mapping source_file -> source_mtime for all drawers."""
+    base = Path(palace_path).expanduser().resolve()
+    conn = sqlite3.connect(str(base / "palace.db"))
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT source_file, json_extract(metadata, '$.source_mtime') as mtime "
+            "FROM drawers WHERE source_file != '' AND source_file IS NOT NULL"
+        ).fetchall()
+        return {row[0]: float(row[1]) for row in rows if row[1] is not None}
+    except (sqlite3.Error, ValueError, TypeError):
+        return {}
+    finally:
+        conn.close()
+
+
+def prefetch_mined_set(palace_path: str) -> set[str]:
+    """Return set of source_file paths already mined at current normalize_version."""
+    base = Path(palace_path).expanduser().resolve()
+    conn = sqlite3.connect(str(base / "palace.db"))
+    try:
+        rows = conn.execute(
+            "SELECT source_file FROM drawers WHERE source_file != '' AND source_file IS NOT NULL"
+        ).fetchall()
+        return {row[0] for row in rows}
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
 
 
 def _sanitize(name: str, kind: str = "name") -> str:
@@ -536,6 +724,69 @@ class Palace:
             return {"id": ids[0], "text": texts[0], "similarity": distances[0],
                     "metadata": metadatas[0] if metadatas else {}}
         return None
+
+    # -- Taxonomy --
+
+    def get_taxonomy(self) -> dict:
+        """Full taxonomy tree: wing → room → drawer_count."""
+        rows = self._db.execute(
+            "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room ORDER BY wing, room"
+        ).fetchall()
+        tree = {}
+        for wing, room, cnt in rows:
+            tree.setdefault(wing, {})[room] = cnt
+        return tree
+
+    # -- Reconnect --
+
+    def reconnect(self) -> bool:
+        """Re-initialize database, FAISS, and KG connections in-place."""
+        self._save_embedder()
+        if self._store:
+            self._store.close()
+        if self._kg:
+            self._kg.close()
+        if self._db:
+            self._db.close()
+        self._db = sqlite3.connect(str(self._base / "palace.db"))
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA foreign_keys=ON")
+        self._fts_enabled = bool(self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='drawers_fts'"
+        ).fetchone())
+        from kai_mempalace.backends.faiss_store import FaissStore
+        from kai_mempalace.backends.knowledge_graph import KnowledgeGraph
+        self._store = FaissStore(str(self._data_dir))
+        self._embedder = NumpyEmbedder(model_dir=str(self._data_dir))
+        self._kg = KnowledgeGraph(str(self._data_dir))
+        self._initialized = True
+        return True
+
+    # -- Memories filed away --
+
+    def memories_filed_away(self) -> dict:
+        """Check when the last memory was saved and total counts."""
+        last = self._db.execute(
+            "SELECT created_at, content FROM drawers ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        total = self._db.execute("SELECT COUNT(*) FROM drawers").fetchone()[0]
+        preview = None
+        last_time = None
+        if last:
+            try:
+                last_time = last["created_at"]
+                content = last["content"]
+            except (TypeError, IndexError):
+                last_time = last[0]
+                content = last[1] if len(last) > 1 else ""
+            if content:
+                preview = (content[:100] + "...") if len(content) > 100 else content
+        return {
+            "total_drawers": total,
+            "last_saved_at": last_time,
+            "last_content_preview": preview,
+        }
 
 
 # ==================== Closet-line entity extraction (for diary_ingest) ====================
