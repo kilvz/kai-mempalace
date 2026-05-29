@@ -318,7 +318,7 @@ class KaiPalaceConfig:
 
     @property
     def default_embedder(self) -> str:
-        """Default embedder model for new palaces. One of: sentence, spacy, numpy."""
+        """Default embedder model for new palaces. One of: sentence, spacy, numpy, bert."""
         env_val = os.environ.get("KAI_DEFAULT_EMBEDDER")
         if env_val:
             return env_val.strip().lower()
@@ -326,7 +326,7 @@ class KaiPalaceConfig:
 
     def set_default_embedder(self, model: str) -> str:
         model = model.strip().lower()
-        if model not in ("sentence", "spacy", "numpy"):
+        if model not in ("sentence", "spacy", "numpy", "bert"):
             raise ValueError("default_embedder must be one of: sentence, spacy, numpy")
         self._file_config["default_embedder"] = model
         self._config_dir.mkdir(parents=True, exist_ok=True)

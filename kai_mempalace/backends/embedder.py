@@ -191,6 +191,20 @@ _onnx_warned: set = set()
 _embedder_cache: dict = {}
 
 
+def _resolve_bert_embedder():
+    """Return best available BERT embedder — prefers ONNX, falls back to numpy."""
+    try:
+        import onnxruntime
+        if onnxruntime.get_available_providers():
+            logger.info("ONNX Runtime available — using OnnxEmbedder for bert model")
+            return OnnxEmbedder()
+    except ImportError:
+        pass
+    logger.info("ONNX Runtime not available — using NumpyBertEmbedder for bert model")
+    from kai_mempalace.backends.bert_embedder import NumpyBertEmbedder
+    return NumpyBertEmbedder()
+
+
 def get_embedder(
     model_dir: Optional[str] = None,
     model: str = "numpy",
@@ -200,6 +214,9 @@ def get_embedder(
     ``model="numpy"`` returns :class:`NumpyEmbedder` (default, always
     available). ``model="minilm"`` returns :class:`OnnxEmbedder`.
     ``model="embeddinggemma"`` returns :class:`EmbeddinggemmaONNX`.
+    ``model="bert"`` returns ONNX embedder if available, else pure
+    numpy BERT (works on Alpine with no PyTorch/ONNX deps).
+    ``model="numpy_bert"`` forces pure numpy BERT.
 
     ONNX-based embedders require ``onnxruntime``, ``transformers``, and
     ``huggingface_hub`` at runtime. Missing dependencies raise
@@ -224,6 +241,11 @@ def get_embedder(
         ef = OnnxEmbedder()
     elif model == "embeddinggemma":
         ef = EmbeddinggemmaONNX()
+    elif model == "bert":
+        ef = _resolve_bert_embedder()
+    elif model == "numpy_bert":
+        from kai_mempalace.backends.bert_embedder import NumpyBertEmbedder
+        ef = NumpyBertEmbedder()
     else:
         raise ValueError(f"Unknown embedder model: {model!r}")
 

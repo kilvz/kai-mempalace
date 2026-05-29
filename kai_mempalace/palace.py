@@ -410,6 +410,12 @@ class Palace:
             except ImportError:
                 logger.warning("spacy not installed — falling back to numpy. Install with: pip install spacy")
                 model = "numpy"
+        elif model == "bert":
+            try:
+                import onnxruntime
+                onnxruntime
+            except ImportError:
+                logger.info("onnxruntime not available for bert — using numpy backend")
         elif model == "minilm" or model == "embeddinggemma":
             try:
                 import onnxruntime
@@ -417,7 +423,7 @@ class Palace:
             except ImportError:
                 logger.warning("onnxruntime not installed for %s — falling back to numpy", model)
                 model = "numpy"
-        if model != "sentence" and config_path.exists():
+        if model not in ("sentence", "bert") and config_path.exists():
             with open(config_path) as f:
                 config = json.load(f)
             if config.get("embedding") != "numpy_tfidf_svd":
@@ -436,6 +442,7 @@ class Palace:
             "SpacyGloveEmbedder": "spacy_glove",
             "OnnxEmbedder": "minilm",
             "EmbeddinggemmaONNX": "embeddinggemma",
+            "NumpyBertEmbedder": "bert",
         }
         return mapping.get(cls_name, "numpy_tfidf_svd")
 
@@ -845,6 +852,8 @@ class Palace:
         "onnx": "minilm",
         "embeddinggemma": "embeddinggemma",
         "gemma": "embeddinggemma",
+        "bert": "bert",
+        "numpy_bert": "bert",
     }
 
     def set_embedder(self, model: str, reindex: bool = True) -> dict:
