@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "kai-mempalace"
+version = "3.3.6"
+description = "FAISS-powered memory palace for Kai 9000 — wings, rooms, drawers, hybrid search, entity graph, MCP"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Kai 9000"},
+]
+dependencies = [
+    "faiss-cpu>=1.7.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+]
+
+[project.scripts]
+kai-mempalace = "kai_mempalace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["kai_mempalace*"]

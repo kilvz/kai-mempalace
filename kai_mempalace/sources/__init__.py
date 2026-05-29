@@ -1,0 +1,58 @@
+"""Source adapter subsystem (RFC 002)."""
+
+from kai_mempalace.sources.base import (
+    AdapterClosedError,
+    AdapterSchema,
+    AuthRequiredError,
+    BaseSourceAdapter,
+    DrawerRecord,
+    FieldSpec,
+    IngestMode,
+    IngestResult,
+    RouteHint,
+    SchemaConformanceError,
+    SourceAdapterError,
+    SourceItemMetadata,
+    SourceNotFoundError,
+    SourceRef,
+    SourceSummary,
+    TransformationViolationError,
+)
+from kai_mempalace.sources.context import PalaceContext, ProgressHook
+from kai_mempalace.sources.registry import (
+    available_adapters,
+    get_adapter,
+    get_adapter_class,
+    register,
+    reset_adapters,
+    resolve_adapter_for_source,
+    unregister,
+)
+
+__all__ = [
+    "AdapterClosedError",
+    "AdapterSchema",
+    "AuthRequiredError",
+    "BaseSourceAdapter",
+    "DrawerRecord",
+    "FieldSpec",
+    "IngestMode",
+    "IngestResult",
+    "PalaceContext",
+    "ProgressHook",
+    "RouteHint",
+    "SchemaConformanceError",
+    "SourceAdapterError",
+    "SourceItemMetadata",
+    "SourceNotFoundError",
+    "SourceRef",
+    "SourceSummary",
+    "TransformationViolationError",
+    "available_adapters",
+    "get_adapter",
+    "get_adapter_class",
+    "register",
+    "reset_adapters",
+    "resolve_adapter_for_source",
+    "unregister",
+]
