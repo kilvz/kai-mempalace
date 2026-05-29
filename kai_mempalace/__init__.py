@@ -3,7 +3,9 @@
 __version__ = "4.1.0"
 
 from kai_mempalace.palace import Palace, SearchResult, mine_lock, MineAlreadyRunning
-from kai_mempalace.backends.embedder import NumpyEmbedder, get_embedder
+from kai_mempalace.backends.embedder import (
+    NumpyEmbedder, SentenceTransformerEmbedder, SpacyGloveEmbedder, get_embedder,
+)
 from kai_mempalace.backends.faiss_store import FaissStore
 from kai_mempalace.backends.knowledge_graph import KnowledgeGraph
 
@@ -61,6 +63,8 @@ __all__ = [
     "mine_lock",
     "MineAlreadyRunning",
     "NumpyEmbedder",
+    "SentenceTransformerEmbedder",
+    "SpacyGloveEmbedder",
     "get_embedder",
     "FaissStore",
     "KnowledgeGraph",

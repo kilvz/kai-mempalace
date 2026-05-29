@@ -216,7 +216,11 @@ def get_embedder(
     if cached is not None:
         return cached
 
-    if model == "minilm":
+    if model == "sentence":
+        ef = SentenceTransformerEmbedder()
+    elif model == "spacy":
+        ef = SpacyGloveEmbedder()
+    elif model == "minilm":
         ef = OnnxEmbedder()
     elif model == "embeddinggemma":
         ef = EmbeddinggemmaONNX()
@@ -225,6 +229,118 @@ def get_embedder(
 
     _embedder_cache[key] = ef
     return ef
+
+
+# ── Sentence-Transformers embedder (via PyTorch, no ONNX) ───────────────
+
+
+class SentenceTransformerEmbedder:
+    """384-dim sentence transformer embedding via PyTorch (no onnxruntime).
+
+    Uses ``sentence-transformers`` + PyTorch under the hood. First call to
+    ``embed()`` downloads the model (cached by ``huggingface_hub``).
+
+    Usage::
+
+        ef = SentenceTransformerEmbedder()
+        vectors = ef.embed(["hello world"])  # -> np.ndarray (n, 384)
+    """
+
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self._model_name = model_name
+        self._model = None
+
+    @property
+    def dimension(self) -> int:
+        return _EMBED_DIM
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._model is not None
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, _EMBED_DIM), dtype=np.float32)
+        self._lazy_load()
+        return self._model.encode(texts, normalize_embeddings=True).astype(np.float32)
+
+    def _lazy_load(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            raise ImportError(
+                "SentenceTransformerEmbedder requires sentence-transformers. "
+                "Install with: pip install sentence-transformers"
+            ) from e
+        self._model = SentenceTransformer(self._model_name)
+        logger.info(
+            "SentenceTransformerEmbedder loaded: model=%s dim=%d",
+            self._model_name, _EMBED_DIM,
+        )
+
+
+# ── spaCy + GloVe embedder (no ONNX, no PyTorch) ────────────────────────
+
+
+class SpacyGloveEmbedder:
+    """300-dim GloVe embedding via spaCy, zero-padded to 384.
+
+    Uses ``spacy`` with ``en_core_web_md`` (or ``en_core_web_lg``) word
+    vectors. Document vectors are averaged word vectors, L2-normalized.
+    Output is zero-padded from 300→384 to match FAISS index dimension.
+
+    First call to ``embed()`` loads the model (downloaded on ``spacy
+    download``).
+
+    Usage::
+
+        ef = SpacyGloveEmbedder()
+        vectors = ef.embed(["hello world"])  # -> np.ndarray (n, 384)
+    """
+
+    _GLOVE_DIM = 300
+
+    def __init__(self, model_name: str = "en_core_web_md"):
+        self._model_name = model_name
+        self._nlp = None
+
+    @property
+    def dimension(self) -> int:
+        return _EMBED_DIM
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._nlp is not None
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, _EMBED_DIM), dtype=np.float32)
+        self._lazy_load()
+        docs = list(self._nlp.pipe(texts))
+        vectors = np.zeros((len(texts), _EMBED_DIM), dtype=np.float32)
+        for i, doc in enumerate(docs):
+            if doc.vector_norm:
+                glove = doc.vector / doc.vector_norm
+                vectors[i, :self._GLOVE_DIM] = glove[:self._GLOVE_DIM]
+        return vectors
+
+    def _lazy_load(self) -> None:
+        if self._nlp is not None:
+            return
+        try:
+            import spacy
+        except ImportError as e:
+            raise ImportError(
+                "SpacyGloveEmbedder requires spacy. "
+                "Install with: pip install spacy && python -m spacy download en_core_web_md"
+            ) from e
+        self._nlp = spacy.load(self._model_name)
+        logger.info(
+            "SpacyGloveEmbedder loaded: model=%s dim=%d (zero-padded to %d)",
+            self._model_name, self._GLOVE_DIM, _EMBED_DIM,
+        )
 
 
 # ── Hardware acceleration support ────────────────────────────────────────
@@ -297,8 +413,8 @@ def describe_device(device: Optional[str] = None) -> str:
     """Return a short human-readable label for the resolved embedding device.
 
     Tries ONNX Runtime first (GPU acceleration when available), then
-    reports ``"numpy_tfidf_svd (cpu)"`` as the fallback since kai's
-    primary embedder is TF-IDF + SVD.
+    reports ``"numpy_tfidf_svd"``, ``"sentence_transformers"``, or
+    ``"spacy_glove"`` depending on which backend is used.
     """
     providers, effective = resolve_embedding_device(device)
     if effective != "cpu":

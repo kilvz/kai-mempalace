@@ -442,6 +442,18 @@ def _build_tool_definitions() -> list[dict]:
             "description": "Rebuild the FTS5 full-text search index from all drawer contents",
             "inputSchema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "set_embedder",
+            "description": "Switch to a different embedding model and optionally reindex all drawers",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Embedder name: sentence, spacy, numpy, minilm, embeddinggemma"},
+                    "reindex": {"type": "boolean", "description": "Re-embed all existing drawers (default true)"},
+                },
+                "required": ["model"],
+            },
+        },
     ]
     _TOOL_DEFINITIONS.extend(extra_tools)
     return _TOOL_DEFINITIONS
@@ -528,6 +540,7 @@ class MCPServer:
         self._register("sync", self._sync, [])
         self._register("reconnect", self._reconnect, [])
         self._register("hook_settings", self._hook_settings, [])
+        self._register("set_embedder", self._set_embedder, ["model"])
 
     def handle_request(self, raw: str) -> str | None:
         """Process one JSON-RPC request line, return JSON response string.
@@ -882,6 +895,12 @@ class MCPServer:
                 desktop_toast=params.get("desktop_toast"),
             )
         return config.get_hook_settings()
+
+    def _set_embedder(self, params: dict) -> dict:
+        return self.palace.set_embedder(
+            model=params["model"],
+            reindex=params.get("reindex", True),
+        )
 
     # -- Helpers ----------------------------------------------------------------
 

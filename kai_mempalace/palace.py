@@ -10,11 +10,11 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
-from kai_mempalace.backends.embedder import NumpyEmbedder, get_embedder
+from kai_mempalace.backends.embedder import get_embedder
 from kai_mempalace.backends.faiss_store import FaissStore
 from kai_mempalace.backends.knowledge_graph import KnowledgeGraph
 
@@ -298,7 +298,7 @@ class Palace:
 
         self._db: Optional[sqlite3.Connection] = None
         self._store: Optional[FaissStore] = None
-        self._embedder: Optional[NumpyEmbedder] = None
+        self._embedder: Optional[Any] = None
         self._kg: Optional[KnowledgeGraph] = None
 
         # Hybrid search state (FTS5)
@@ -338,7 +338,7 @@ class Palace:
         self._db.commit()
 
         self._store = FaissStore(str(self._data_dir))
-        self._embedder = NumpyEmbedder(model_dir=str(self._data_dir))
+        self._embedder = self._load_embedder(is_new=is_new)
         self._kg = KnowledgeGraph(str(self._data_dir))
         self._fts_enabled = True
 
@@ -346,7 +346,7 @@ class Palace:
             with open(self._base / "palace.json", "w") as f:
                 json.dump({
                     "version": 3, "created_at": datetime.utcnow().isoformat(),
-                    "backend": "faiss", "embedding": "numpy_tfidf_svd", "dimension": 384,
+                    "backend": "faiss", "embedding": "sentence_transformers", "dimension": 384,
                 }, f)
 
         self._initialized = True
@@ -365,10 +365,27 @@ class Palace:
 
     def _save_embedder(self):
         if self._embedder and self._embedder.is_fitted:
-            try:
-                self._embedder.save(str(self._data_dir))
-            except Exception:
-                pass
+            save = getattr(self._embedder, "save", None)
+            if save:
+                try:
+                    save(str(self._data_dir))
+                except Exception:
+                    pass
+
+    def _load_embedder(self, is_new: bool = False) -> Any:
+        config_path = self._base / "palace.json"
+        model = "sentence"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            model = config.get("embedding", "numpy")
+            mapping = {
+                "numpy_tfidf_svd": "numpy",
+                "sentence_transformers": "sentence",
+                "spacy_glove": "spacy",
+            }
+            model = mapping.get(model, model)
+        return get_embedder(model=model, model_dir=str(self._data_dir))
 
     @property
     def kg(self) -> KnowledgeGraph:
@@ -758,10 +775,95 @@ class Palace:
         from kai_mempalace.backends.faiss_store import FaissStore
         from kai_mempalace.backends.knowledge_graph import KnowledgeGraph
         self._store = FaissStore(str(self._data_dir))
-        self._embedder = NumpyEmbedder(model_dir=str(self._data_dir))
+        self._embedder = self._load_embedder()
         self._kg = KnowledgeGraph(str(self._data_dir))
         self._initialized = True
         return True
+
+    # -- Embedder management --
+
+    _EMBEDDER_CONFIG_NAMES: dict[str, str] = {
+        "numpy": "numpy_tfidf_svd",
+        "numpy_tfidf_svd": "numpy_tfidf_svd",
+        "sentence": "sentence_transformers",
+        "sentence_transformers": "sentence_transformers",
+        "spacy": "spacy_glove",
+        "spacy_glove": "spacy_glove",
+        "minilm": "minilm",
+        "onnx": "minilm",
+        "embeddinggemma": "embeddinggemma",
+        "gemma": "embeddinggemma",
+    }
+
+    def set_embedder(self, model: str, reindex: bool = True) -> dict:
+        """Switch to a different embedding model.
+
+        ``model`` accepts short names (``"sentence"``, ``"spacy"``,
+        ``"numpy"``) or config names (``"sentence_transformers"``,
+        ``"spacy_glove"``, ``"numpy_tfidf_svd"``).
+
+        When ``reindex=True``, all existing drawers are re-embedded with
+        the new model and the FAISS index is rebuilt.
+        """
+        config_name = self._EMBEDDER_CONFIG_NAMES.get(model)
+        if config_name is None:
+            valid = sorted(set(self._EMBEDDER_CONFIG_NAMES.values()))
+            raise ValueError(
+                f"Unknown embedder model: {model!r}. "
+                f"Valid options: {valid}"
+            )
+
+        # Write new config
+        config_path = self._base / "palace.json"
+        config = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+        config["embedding"] = config_name
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+
+        # Load new embedder
+        self._save_embedder()
+        self._embedder = self._load_embedder()
+
+        info = {
+            "model": config_name,
+            "dimension": self._embedder.dimension,
+        }
+
+        if reindex:
+            count = self._reindex_embeddings()
+            info["reindexed"] = count
+
+        return info
+
+    def _reindex_embeddings(self) -> int:
+        """Re-embed all drawers with the current embedder and rebuild FAISS."""
+        rows = self._db.execute(
+            "SELECT id, content, metadata, source_file FROM drawers"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        ids = [r[0] for r in rows]
+        contents = [r[1] for r in rows]
+        vectors = self._embedder.embed(contents)
+        metadatas = []
+        for r in rows:
+            md = json.loads(r[2]) if isinstance(r[2], str) and r[2] else {}
+            md["source_file"] = r[3] or ""
+            metadatas.append(md)
+
+        from kai_mempalace.backends.faiss_store import FaissStore
+        if self._store:
+            self._store.close()
+        for f in ["index.faiss", "metadata.db", "seq.txt"]:
+            (self._data_dir / f).unlink(missing_ok=True)
+        self._store = FaissStore(str(self._data_dir))
+        self._store.add(ids, contents, metadatas, vectors)
+
+        return len(ids)
 
     # -- Memories filed away --
 
